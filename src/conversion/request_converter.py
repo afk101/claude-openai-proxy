@@ -51,8 +51,21 @@ def split_system_messages(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str
 
 
 def resolve_max_tokens(request: OpenAIChatCompletionRequest) -> int:
-    """解析 Claude 所需的 max_tokens。"""
-    return request.max_tokens or request.max_completion_tokens or Constants.DEFAULT_MAX_TOKENS
+    """解析 Claude 所需的 max_tokens，优先使用客户端设置，其次使用模型映射。"""
+    if request.max_tokens is not None:
+        return request.max_tokens
+    if request.max_completion_tokens is not None:
+        return request.max_completion_tokens
+
+    model_max_tokens = Constants.MODEL_MAX_TOKENS_MAP.get(request.model)
+    if model_max_tokens is not None:
+        return model_max_tokens
+
+    for model_prefix, max_tokens in Constants.MODEL_MAX_TOKENS_MAP.items():
+        if request.model.startswith(model_prefix):
+            return max_tokens
+
+    return Constants.DEFAULT_MAX_TOKENS
 
 
 def merge_system_messages(messages: List[Dict[str, Any]]) -> Optional[str]:

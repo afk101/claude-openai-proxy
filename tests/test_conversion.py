@@ -3,12 +3,97 @@
 import json
 import asyncio
 
-from src.conversion.request_converter import convert_openai_to_claude_request
+from src.conversion.request_converter import convert_openai_to_claude_request, resolve_max_tokens
 from src.conversion.response_converter import (
     convert_claude_response_to_openai,
     convert_claude_streaming_to_openai,
 )
 from src.models.openai import OpenAIChatCompletionRequest
+
+
+def test_resolve_max_tokens_uses_model_mapping_when_client_omits_token_limit():
+    """客户端未传 token 上限时，应按模型映射解析默认 max_tokens。"""
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(model="claude-opus-4-8", messages=[])
+        )
+        == 128000
+    )
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(
+                model="claude-3-5-sonnet-20241022", messages=[]
+            )
+        )
+        == 8192
+    )
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(model="claude-sonnet-4-6", messages=[])
+        )
+        == 64000
+    )
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(model="claude-haiku-4-5", messages=[])
+        )
+        == 64000
+    )
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(
+                model="claude-haiku-4-5-20251001", messages=[]
+            )
+        )
+        == 64000
+    )
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(model="claude-3-opus-20240229", messages=[])
+        )
+        == 4096
+    )
+
+
+def test_resolve_max_tokens_keeps_client_token_overrides():
+    """客户端显式传入 token 上限时，应优先使用客户端设置。"""
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(
+                model="claude-opus-4-8", messages=[], max_tokens=100
+            )
+        )
+        == 100
+    )
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(
+                model="claude-opus-4-8", messages=[], max_completion_tokens=200
+            )
+        )
+        == 200
+    )
+
+
+def test_resolve_max_tokens_falls_back_for_unknown_models():
+    """未知模型应回退到全局默认 max_tokens。"""
+    assert (
+        resolve_max_tokens(
+            OpenAIChatCompletionRequest(model="unknown-claude-model", messages=[])
+        )
+        == 4096
+    )
+
+
+def test_convert_openai_request_sets_model_based_max_tokens():
+    """转换 Claude 请求时，应带上模型对应的 max_tokens。"""
+    request = OpenAIChatCompletionRequest(
+        model="claude-fable-5", messages=[{"role": "user", "content": "写一篇长文"}]
+    )
+
+    result = convert_openai_to_claude_request(request)
+
+    assert result["max_tokens"] == 128000
 
 
 def test_convert_openai_request_to_claude_request_with_tools_and_tool_results():
