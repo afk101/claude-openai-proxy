@@ -40,3 +40,19 @@ class Constants:
 
     DEFAULT_MAX_TOKENS = 4096
     DEFAULT_PORT = 7072
+
+    MODEL_MAX_TOKENS_MAP = {
+        "claude-fable-5": 128000,
+        "claude-mythos-5": 128000,
+        "claude-opus-4-8": 128000,
+        "claude-opus-4-7": 128000,
+        "claude-sonnet-5": 128000,
+        "claude-sonnet-4-6": 128000,
+        "claude-haiku-4-5-20251001": 128000,
+        "claude-3-5-sonnet-20241022": 8192,
+        "claude-3-5-sonnet-20240620": 8192,
+        "claude-3-5-haiku-20241022": 8192,
+        "claude-3-opus-20240229": 4096,
+        "claude-3-sonnet-20240229": 4096,
+        "claude-3-haiku-20240307": 4096,
+    }
