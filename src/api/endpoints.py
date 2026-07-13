@@ -1,5 +1,6 @@
 """OpenAI 兼容 API 路由。"""
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -17,6 +18,7 @@ from src.core.config import config
 from src.models.openai import OpenAIChatCompletionRequest
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 claude_client = ClaudeClient(
     config.claude_api_key,
@@ -53,7 +55,22 @@ async def create_chat_completion(
 ):
     """OpenAI Chat Completions 兼容入口。"""
     request_id = str(uuid.uuid4())
+    logger.info(
+        "chat_completion_received request_id=%s model=%s stream=%s message_count=%s tool_count=%s",
+        request_id,
+        request.model,
+        bool(request.stream),
+        len(request.messages),
+        len(request.tools or []),
+    )
     claude_request = convert_openai_to_claude_request(request)
+    logger.info(
+        "chat_completion_upstream_request request_id=%s model=%s stream=%s max_tokens=%s",
+        request_id,
+        claude_request["model"],
+        claude_request["stream"],
+        claude_request["max_tokens"],
+    )
 
     if await http_request.is_disconnected():
         raise HTTPException(status_code=499, detail="Client disconnected")
@@ -61,6 +78,7 @@ async def create_chat_completion(
     if request.stream:
         claude_request["stream"] = True
         claude_stream = claude_client.create_message_stream(claude_request, request_id)
+        logger.info("chat_completion_stream_started request_id=%s", request_id)
         return StreamingResponse(
             _stream_with_disconnect_check(claude_stream, request, http_request, request_id),
             media_type="text/event-stream",
@@ -68,6 +86,7 @@ async def create_chat_completion(
         )
 
     claude_response = await claude_client.create_message(claude_request, request_id)
+    logger.info("chat_completion_completed request_id=%s", request_id)
     return convert_claude_response_to_openai(claude_response, request)
 
 
@@ -75,11 +94,21 @@ async def create_chat_completion(
 
 async def _stream_with_disconnect_check(claude_stream, original_request, http_request, request_id):
     """流式响应包装器，检测客户端断开并取消上游请求。"""
-    async for chunk in convert_claude_streaming_to_openai(claude_stream, original_request):
-        if await http_request.is_disconnected():
-            claude_client.cancel_request(request_id)
-            break
-        yield chunk
+    chunk_count = 0
+    try:
+        async for chunk in convert_claude_streaming_to_openai(claude_stream, original_request):
+            if await http_request.is_disconnected():
+                logger.warning("chat_completion_client_disconnected request_id=%s", request_id)
+                claude_client.cancel_request(request_id)
+                break
+            chunk_count += 1
+            yield chunk
+    finally:
+        logger.info(
+            "chat_completion_stream_finished request_id=%s chunk_count=%s",
+            request_id,
+            chunk_count,
+        )
 @router.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """健康检查。"""

@@ -2,10 +2,15 @@
 
 import asyncio
 import json
+import logging
 from typing import Any, AsyncGenerator, Dict, Optional
 
 import httpx
 from fastapi import HTTPException
+
+from src.core.constants import Constants
+
+logger = logging.getLogger(__name__)
 
 
 class ClaudeClient:
@@ -179,6 +184,11 @@ class ClaudeClient:
         """解析上游 JSON 响应。"""
         if response.status_code >= 400:
             error_message = self._extract_error_message(response)
+            logger.warning(
+                "claude_upstream_error status_code=%s detail=%s",
+                response.status_code,
+                sanitize_error_detail_for_log(error_message, self.api_key),
+            )
             friendly_message = self.classify_claude_error(error_message)
             raise HTTPException(status_code=response.status_code, detail=friendly_message)
         try:
@@ -198,3 +208,11 @@ class ClaudeClient:
             return response.text
         except json.JSONDecodeError:
             return response.text
+
+
+def sanitize_error_detail_for_log(error_detail: str, api_key: Optional[str]) -> str:
+    """脱敏并截断上游错误详情，避免日志泄露密钥或大量内容。"""
+    sanitized_detail = str(error_detail)
+    if api_key:
+        sanitized_detail = sanitized_detail.replace(api_key, "[REDACTED]")
+    return sanitized_detail[: Constants.MAX_ERROR_LOG_DETAIL_LENGTH]

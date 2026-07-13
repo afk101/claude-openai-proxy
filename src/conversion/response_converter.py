@@ -26,13 +26,20 @@ def convert_claude_response_to_openai(
             {
                 "index": 0,
                 "message": message,
-                "finish_reason": map_stop_reason_to_finish_reason(
-                    claude_response.get("stop_reason")
-                ),
+                "finish_reason": resolve_finish_reason(claude_response, message),
             }
         ],
         "usage": usage,
     }
+
+
+def resolve_finish_reason(
+    claude_response: Dict[str, Any], message: Dict[str, Any]
+) -> str:
+    """根据工具调用内容和上游停止原因确定 OpenAI 结束原因。"""
+    if message.get("tool_calls"):
+        return Constants.FINISH_TOOL_CALLS
+    return map_stop_reason_to_finish_reason(claude_response.get("stop_reason"))
 
 
 def build_openai_message(content_blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -144,7 +151,7 @@ async def convert_claude_sse_line(
             yield format_sse_chunk(chunk)
     elif event_type == Constants.EVENT_MESSAGE_DELTA:
         update_usage_from_message_delta(event, state)
-        finish_reason = map_stop_reason_to_finish_reason((event.get("delta") or {}).get("stop_reason"))
+        finish_reason = resolve_stream_finish_reason(event, state)
         state["finished"] = True
         yield format_sse_chunk(build_final_chunk(state, finish_reason))
 
@@ -162,6 +169,13 @@ def parse_sse_event(line: str) -> Optional[Dict[str, Any]]:
         except json.JSONDecodeError:
             return None
     return None
+
+
+def resolve_stream_finish_reason(event: Dict[str, Any], state: Dict[str, Any]) -> str:
+    """根据流式工具调用状态和上游停止原因确定结束原因。"""
+    if state["tool_calls"]:
+        return Constants.FINISH_TOOL_CALLS
+    return map_stop_reason_to_finish_reason((event.get("delta") or {}).get("stop_reason"))
 
 
 def update_usage_from_message_start(event: Dict[str, Any], state: Dict[str, Any]) -> None:

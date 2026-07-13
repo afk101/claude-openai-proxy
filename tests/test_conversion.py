@@ -11,48 +11,34 @@ from src.conversion.response_converter import (
 from src.models.openai import OpenAIChatCompletionRequest
 
 
-def test_resolve_max_tokens_uses_model_mapping_when_client_omits_token_limit():
-    """客户端未传 token 上限时，应按模型映射解析默认 max_tokens。"""
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(model="claude-opus-4-8", messages=[])
-        )
-        == 128000
+def test_resolve_max_tokens_uses_client_limit_for_arbitrary_model():
+    """任意模型应使用调用方指定的输出 token 上限。"""
+    request = OpenAIChatCompletionRequest(
+        model="claude-4.8-opus", messages=[], max_tokens=123456
     )
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(
-                model="claude-3-5-sonnet-20241022", messages=[]
-            )
-        )
-        == 8192
+
+    assert resolve_max_tokens(request) == 123456
+
+
+def test_resolve_max_tokens_uses_generic_default_for_arbitrary_model():
+    """任意模型未传输出上限时，应使用统一默认值而非模型映射。"""
+    request = OpenAIChatCompletionRequest(model="custom-upstream-model", messages=[])
+
+    assert resolve_max_tokens(request) == 200000
+
+
+def test_convert_openai_request_preserves_arbitrary_model_for_upstream():
+    """转换到上游时应原样保留调用方模型标识。"""
+    request = OpenAIChatCompletionRequest(
+        model="claude-4.8-opus",
+        messages=[{"role": "user", "content": "你好"}],
+        max_tokens=123456,
     )
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(model="claude-sonnet-4-6", messages=[])
-        )
-        == 64000
-    )
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(model="claude-haiku-4-5", messages=[])
-        )
-        == 64000
-    )
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(
-                model="claude-haiku-4-5-20251001", messages=[]
-            )
-        )
-        == 64000
-    )
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(model="claude-3-opus-20240229", messages=[])
-        )
-        == 4096
-    )
+
+    result = convert_openai_to_claude_request(request)
+
+    assert result["model"] == "claude-4.8-opus"
+    assert result["max_tokens"] == 123456
 
 
 def test_resolve_max_tokens_keeps_client_token_overrides():
@@ -60,7 +46,7 @@ def test_resolve_max_tokens_keeps_client_token_overrides():
     assert (
         resolve_max_tokens(
             OpenAIChatCompletionRequest(
-                model="claude-opus-4-8", messages=[], max_tokens=100
+                model="custom-upstream-model", messages=[], max_tokens=100
             )
         )
         == 100
@@ -68,38 +54,17 @@ def test_resolve_max_tokens_keeps_client_token_overrides():
     assert (
         resolve_max_tokens(
             OpenAIChatCompletionRequest(
-                model="claude-opus-4-8", messages=[], max_completion_tokens=200
+                model="custom-upstream-model", messages=[], max_completion_tokens=200
             )
         )
         == 200
     )
 
 
-def test_resolve_max_tokens_falls_back_for_unknown_models():
-    """未知模型应回退到全局默认 max_tokens。"""
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(model="unknown-claude-model", messages=[])
-        )
-        == 4096
-    )
-
-
-def test_convert_openai_request_sets_model_based_max_tokens():
-    """转换 Claude 请求时，应带上模型对应的 max_tokens。"""
-    request = OpenAIChatCompletionRequest(
-        model="claude-fable-5", messages=[{"role": "user", "content": "写一篇长文"}]
-    )
-
-    result = convert_openai_to_claude_request(request)
-
-    assert result["max_tokens"] == 128000
-
-
 def test_convert_openai_request_to_claude_request_with_tools_and_tool_results():
     """Chat Completions 请求应转换为 Claude Messages 请求。"""
     request = OpenAIChatCompletionRequest(
-        model="gpt-4o",
+        model="custom-upstream-model",
         messages=[
             {"role": "system", "content": "你是严格的助手。"},
             {
@@ -151,7 +116,7 @@ def test_convert_openai_request_to_claude_request_with_tools_and_tool_results():
 
     result = convert_openai_to_claude_request(request)
 
-    assert result["model"] == "gpt-4o"
+    assert result["model"] == "custom-upstream-model"
     assert result["system"] == "你是严格的助手。"
     assert result["max_tokens"] == 256
     assert result["temperature"] == 0.2
@@ -215,14 +180,16 @@ def test_convert_claude_response_to_openai_chat_completion_with_thinking_and_too
         "usage": {"input_tokens": 10, "output_tokens": 5},
     }
     request = OpenAIChatCompletionRequest(
-        model="gpt-4o", messages=[{"role": "user", "content": "天气"}]
+        model="custom-upstream-model",
+        messages=[{"role": "user", "content": "天气"}],
+        max_tokens=64,
     )
 
     result = convert_claude_response_to_openai(claude_response, request)
 
     assert result["id"] == "msg_123"
     assert result["object"] == "chat.completion"
-    assert result["model"] == "gpt-4o"
+    assert result["model"] == "custom-upstream-model"
     assert result["choices"][0]["finish_reason"] == "tool_calls"
     message = result["choices"][0]["message"]
     assert message["role"] == "assistant"
@@ -240,6 +207,32 @@ def test_convert_claude_response_to_openai_chat_completion_with_thinking_and_too
         "completion_tokens": 5,
         "total_tokens": 15,
     }
+
+
+def test_convert_claude_response_marks_tool_calls_even_when_upstream_ends_turn():
+    """上游以 end_turn 结束工具调用时，OpenAI 响应仍应标记 tool_calls。"""
+    claude_response = {
+        "id": "msg_tool_end_turn",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "tool_1",
+                "name": "lookup",
+                "input": {"query": "天气"},
+            }
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    request = OpenAIChatCompletionRequest(
+        model="custom-upstream-model",
+        messages=[{"role": "user", "content": "天气"}],
+        max_tokens=64,
+    )
+
+    result = convert_claude_response_to_openai(claude_response, request)
+
+    assert result["choices"][0]["finish_reason"] == "tool_calls"
 
 
 def test_convert_claude_streaming_to_openai_chat_completion_chunks():
@@ -277,7 +270,10 @@ def test_convert_claude_streaming_to_openai_chat_completion_chunks():
                 yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
 
         request = OpenAIChatCompletionRequest(
-            model="gpt-4o", messages=[{"role": "user", "content": "你好"}], stream=True
+            model="custom-upstream-model",
+            messages=[{"role": "user", "content": "你好"}],
+            max_tokens=64,
+            stream=True,
         )
 
         return [
@@ -301,3 +297,41 @@ def test_convert_claude_streaming_to_openai_chat_completion_chunks():
         "completion_tokens": 2,
         "total_tokens": 5,
     }
+
+
+def test_convert_claude_streaming_marks_tool_calls_when_upstream_ends_turn():
+    """流式工具调用即使上游以 end_turn 结束也应标记 tool_calls。"""
+    async def run_stream_conversion():
+        async def claude_stream():
+            events = [
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "tool_1",
+                        "name": "lookup",
+                        "input": {},
+                    },
+                },
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 1},
+                },
+            ]
+            for event in events:
+                yield f"data: {json.dumps(event)}\n\n"
+
+        request = OpenAIChatCompletionRequest(
+            model="custom-upstream-model",
+            messages=[{"role": "user", "content": "天气"}],
+            max_tokens=64,
+            stream=True,
+        )
+        return [chunk async for chunk in convert_claude_streaming_to_openai(claude_stream(), request)]
+
+    chunks = asyncio.run(run_stream_conversion())
+    final_chunk = json.loads(chunks[-2].removeprefix("data: "))
+
+    assert final_chunk["choices"][0]["finish_reason"] == "tool_calls"

@@ -56,6 +56,8 @@ python -m pip install -r requirements.txt
 | `REQUEST_TIMEOUT` | `90` | 请求连接/写入超时秒数 |
 | `READ_TIMEOUT` | `480` | 流式读取超时秒数 |
 
+模型名称会原样透传给上游。调用方指定 `max_tokens` 或 `max_completion_tokens` 时，代理会使用该值；两者均未指定时，统一默认 `200000`。
+
 ## 启动
 
 方式一：使用 `uv run` 启动，推荐用于避免跑到错误的 Python 环境：
@@ -87,7 +89,7 @@ http://127.0.0.1:7072
 curl http://127.0.0.1:7072/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "Auto",
     "messages": [
       {"role": "user", "content": "请只回复两个字：你好"}
     ],
@@ -102,7 +104,7 @@ curl http://127.0.0.1:7072/v1/chat/completions \
 curl -N http://127.0.0.1:7072/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "360-glm-5.2",
     "messages": [
       {"role": "user", "content": "请用一句话回答：1+1等于几？"}
     ],
