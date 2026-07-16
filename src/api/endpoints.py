@@ -96,7 +96,9 @@ async def _stream_with_disconnect_check(claude_stream, original_request, http_re
     """流式响应包装器，检测客户端断开并取消上游请求。"""
     chunk_count = 0
     try:
-        async for chunk in convert_claude_streaming_to_openai(claude_stream, original_request):
+        async for chunk in convert_claude_streaming_to_openai(
+            claude_stream, original_request, request_id
+        ):
             if await http_request.is_disconnected():
                 logger.warning("chat_completion_client_disconnected request_id=%s", request_id)
                 claude_client.cancel_request(request_id)

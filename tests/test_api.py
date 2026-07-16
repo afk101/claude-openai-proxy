@@ -31,7 +31,7 @@ def test_chat_completions_endpoint_accepts_arbitrary_model_with_default_token_bu
 
     assert response.status_code == 200
     assert captured["request"]["model"] == "claude-4.8-opus"
-    assert captured["request"]["max_tokens"] == 200000
+    assert captured["request"]["max_tokens"] == 128000
 
 
 def test_chat_completions_endpoint_converts_request_and_response(monkeypatch, caplog):

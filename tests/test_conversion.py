@@ -2,6 +2,7 @@
 
 import json
 import asyncio
+import logging
 
 from src.conversion.request_converter import convert_openai_to_claude_request, resolve_max_tokens
 from src.conversion.response_converter import (
@@ -24,7 +25,7 @@ def test_resolve_max_tokens_uses_generic_default_for_arbitrary_model():
     """任意模型未传输出上限时，应使用统一默认值而非模型映射。"""
     request = OpenAIChatCompletionRequest(model="custom-upstream-model", messages=[])
 
-    assert resolve_max_tokens(request) == 200000
+    assert resolve_max_tokens(request) == 128000
 
 
 def test_convert_openai_request_preserves_arbitrary_model_for_upstream():
@@ -340,3 +341,37 @@ def test_convert_claude_streaming_marks_tool_calls_when_upstream_ends_turn():
     final_chunk = json.loads(chunks[-2].removeprefix("data: "))
 
     assert final_chunk["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_convert_claude_streaming_logs_empty_response_summary(caplog):
+    """空流完成时应记录不含正文的诊断摘要。"""
+    async def run_stream_conversion():
+        async def claude_stream():
+            events = [
+                {
+                    "type": "message_start",
+                    "message": {"usage": {"input_tokens": 3, "output_tokens": 0}},
+                },
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 0},
+                },
+            ]
+            for event in events:
+                yield f"data: {json.dumps(event)}\n\n"
+
+        request = OpenAIChatCompletionRequest(
+            model="Auto", messages=[{"role": "user", "content": "你好"}], max_tokens=64, stream=True
+        )
+        return [chunk async for chunk in convert_claude_streaming_to_openai(claude_stream(), request)]
+
+    caplog.set_level(logging.INFO, logger="src.conversion.response_converter")
+    asyncio.run(run_stream_conversion())
+
+    assert any(
+        "openai_stream_conversion_summary" in record.message
+        and "content_chunk_count=0" in record.message
+        and "finish_reason=stop" in record.message
+        for record in caplog.records
+    )

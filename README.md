@@ -56,7 +56,7 @@ python -m pip install -r requirements.txt
 | `REQUEST_TIMEOUT` | `90` | 请求连接/写入超时秒数 |
 | `READ_TIMEOUT` | `480` | 流式读取超时秒数 |
 
-模型名称会原样透传给上游。调用方指定 `max_tokens` 或 `max_completion_tokens` 时，代理会使用该值；两者均未指定时，统一默认 `200000`。
+模型名称会原样透传给上游。调用方指定 `max_tokens` 或 `max_completion_tokens` 时，代理会使用该值；两者均未指定时，统一默认 `128000`。
 
 ## 启动
 

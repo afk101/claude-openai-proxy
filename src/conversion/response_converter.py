@@ -1,12 +1,15 @@
 """Claude Messages 响应到 OpenAI Chat Completions 响应的转换。"""
 
 import json
+import logging
 import time
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from src.core.constants import Constants
 from src.models.openai import OpenAIChatCompletionRequest
+
+logger = logging.getLogger(__name__)
 
 
 def convert_claude_response_to_openai(
@@ -102,19 +105,25 @@ def map_stop_reason_to_finish_reason(stop_reason: Optional[str]) -> str:
 
 
 async def convert_claude_streaming_to_openai(
-    claude_stream: AsyncGenerator[str, None], original_request: OpenAIChatCompletionRequest
+    claude_stream: AsyncGenerator[str, None],
+    original_request: OpenAIChatCompletionRequest,
+    request_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """将 Claude SSE 流转换为 OpenAI Chat Completions SSE 流。"""
     state = create_stream_state(original_request)
-    yield format_sse_chunk(build_chunk(state, {"role": Constants.ROLE_ASSISTANT}))
+    try:
+        yield format_sse_chunk(build_chunk(state, {"role": Constants.ROLE_ASSISTANT}))
 
-    async for line in claude_stream:
-        async for chunk in convert_claude_sse_line(line, state):
-            yield chunk
+        async for line in claude_stream:
+            async for chunk in convert_claude_sse_line(line, state):
+                yield chunk
 
-    if not state["finished"]:
-        yield format_sse_chunk(build_final_chunk(state, Constants.FINISH_STOP))
-    yield "data: [DONE]\n\n"
+        if not state["finished"]:
+            state["finish_reason"] = Constants.FINISH_STOP
+            yield format_sse_chunk(build_final_chunk(state, Constants.FINISH_STOP))
+        yield "data: [DONE]\n\n"
+    finally:
+        log_stream_conversion_summary(state, request_id)
 
 
 def create_stream_state(original_request: OpenAIChatCompletionRequest) -> Dict[str, Any]:
@@ -127,6 +136,13 @@ def create_stream_state(original_request: OpenAIChatCompletionRequest) -> Dict[s
         "completion_tokens": 0,
         "tool_calls": {},
         "finished": False,
+        "upstream_event_count": 0,
+        "upstream_event_types": {},
+        "content_chunk_count": 0,
+        "reasoning_chunk_count": 0,
+        "tool_call_chunk_count": 0,
+        "finish_reason": None,
+        "upstream_stop_reason": None,
     }
 
 
@@ -139,6 +155,7 @@ async def convert_claude_sse_line(
         return
 
     event_type = event.get("type")
+    record_upstream_stream_event(state, event_type)
     if event_type == Constants.EVENT_MESSAGE_START:
         update_usage_from_message_start(event, state)
     elif event_type == Constants.EVENT_CONTENT_BLOCK_START:
@@ -148,10 +165,13 @@ async def convert_claude_sse_line(
     elif event_type == Constants.EVENT_CONTENT_BLOCK_DELTA:
         chunk = convert_content_block_delta(event, state)
         if chunk:
+            record_converted_stream_delta(state, event)
             yield format_sse_chunk(chunk)
     elif event_type == Constants.EVENT_MESSAGE_DELTA:
         update_usage_from_message_delta(event, state)
         finish_reason = resolve_stream_finish_reason(event, state)
+        state["finish_reason"] = finish_reason
+        state["upstream_stop_reason"] = (event.get("delta") or {}).get("stop_reason")
         state["finished"] = True
         yield format_sse_chunk(build_final_chunk(state, finish_reason))
 
@@ -176,6 +196,47 @@ def resolve_stream_finish_reason(event: Dict[str, Any], state: Dict[str, Any]) -
     if state["tool_calls"]:
         return Constants.FINISH_TOOL_CALLS
     return map_stop_reason_to_finish_reason((event.get("delta") or {}).get("stop_reason"))
+
+
+def record_upstream_stream_event(state: Dict[str, Any], event_type: Any) -> None:
+    """记录上游 SSE 事件类型统计，不保存事件正文。"""
+    normalized_type = str(event_type or "unknown")
+    state["upstream_event_count"] += 1
+    state["upstream_event_types"][normalized_type] = (
+        state["upstream_event_types"].get(normalized_type, 0) + 1
+    )
+
+
+def record_converted_stream_delta(state: Dict[str, Any], event: Dict[str, Any]) -> None:
+    """记录转换出的内容类别数量，不保存内容数据。"""
+    delta_type = (event.get("delta") or {}).get("type")
+    if delta_type == Constants.DELTA_TEXT:
+        state["content_chunk_count"] += 1
+    elif delta_type == Constants.DELTA_THINKING:
+        state["reasoning_chunk_count"] += 1
+    elif delta_type == Constants.DELTA_INPUT_JSON:
+        state["tool_call_chunk_count"] += 1
+
+
+def log_stream_conversion_summary(state: Dict[str, Any], request_id: Optional[str]) -> None:
+    """输出流式转换的脱敏诊断摘要。"""
+    logger.info(
+        "openai_stream_conversion_summary request_id=%s upstream_event_count=%s "
+        "upstream_event_types=%s content_chunk_count=%s reasoning_chunk_count=%s "
+        "tool_call_chunk_count=%s finish_reason=%s upstream_stop_reason=%s "
+        "prompt_tokens=%s completion_tokens=%s finished=%s",
+        request_id,
+        state["upstream_event_count"],
+        state["upstream_event_types"],
+        state["content_chunk_count"],
+        state["reasoning_chunk_count"],
+        state["tool_call_chunk_count"],
+        state["finish_reason"],
+        state["upstream_stop_reason"],
+        state["prompt_tokens"],
+        state["completion_tokens"],
+        state["finished"],
+    )
 
 
 def update_usage_from_message_start(event: Dict[str, Any], state: Dict[str, Any]) -> None:

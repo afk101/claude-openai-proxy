@@ -38,6 +38,6 @@ class Constants:
     DELTA_THINKING = "thinking_delta"
     DELTA_INPUT_JSON = "input_json_delta"
 
-    DEFAULT_MAX_TOKENS = 200000
+    DEFAULT_MAX_TOKENS = 128000
     DEFAULT_PORT = 7072
     MAX_ERROR_LOG_DETAIL_LENGTH = 1000
