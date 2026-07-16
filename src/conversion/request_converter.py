@@ -71,8 +71,32 @@ def merge_system_messages(
 
 
 def convert_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """转换 OpenAI 消息列表为 Claude 消息列表。"""
-    return [convert_openai_message(message) for message in messages]
+    """转换 OpenAI 消息并合并相邻同角色 Claude 回合。"""
+    converted = [convert_openai_message(message) for message in messages]
+    return merge_adjacent_messages(converted)
+
+
+def message_content_to_blocks(content: Any) -> List[Dict[str, Any]]:
+    """将已转换的 Claude message content 规范为可合并内容块列表。"""
+    if isinstance(content, list):
+        return list(content)
+    if not content:
+        return []
+    return [{"type": Constants.CONTENT_TEXT, "text": str(content)}]
+
+
+def merge_adjacent_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按 Claude 语义合并相邻同角色消息并保持内容块顺序。"""
+    merged: List[Dict[str, Any]] = []
+    for message in messages:
+        if merged and merged[-1].get("role") == message.get("role"):
+            merged[-1]["content"] = [
+                *message_content_to_blocks(merged[-1].get("content")),
+                *message_content_to_blocks(message.get("content")),
+            ]
+            continue
+        merged.append(dict(message))
+    return merged
 
 
 def convert_openai_message(message: Dict[str, Any]) -> Dict[str, Any]:

@@ -165,6 +165,135 @@ def test_convert_openai_request_to_claude_request_with_tools_and_tool_results():
     }
 
 
+def test_convert_merges_consecutive_user_messages_without_losing_image():
+    """连续 user 消息应合并为单一 Claude 回合，并保留图片内容块。"""
+    request = OpenAIChatCompletionRequest(
+        model="360-glm-5.2",
+        messages=[
+            {"role": "system", "content": "系统规则"},
+            {"role": "user", "content": "前置文本"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "识别图片"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,iVBORw0KGgo="
+                        },
+                    },
+                ],
+            },
+        ],
+    )
+
+    result = convert_openai_to_claude_request(request)
+
+    assert result["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "前置文本"},
+                {"type": "text", "text": "识别图片"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "iVBORw0KGgo=",
+                    },
+                },
+            ],
+        }
+    ]
+
+
+def test_convert_merges_consecutive_tool_results():
+    """同一 assistant 回合的连续工具结果应合并，并保持调用标识与顺序。"""
+    request = OpenAIChatCompletionRequest(
+        model="360-glm-5.2",
+        messages=[
+            {"role": "user", "content": "依次查询天气与时间"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": "{}"},
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "time", "arguments": "{}"},
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "晴天"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "10:30"},
+        ],
+    )
+
+    result = convert_openai_to_claude_request(request)
+
+    assert result["messages"][-1] == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "call_1", "content": "晴天"},
+            {"type": "tool_result", "tool_use_id": "call_2", "content": "10:30"},
+        ],
+    }
+    assert [message["role"] for message in result["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+
+
+def test_convert_merges_consecutive_assistant_content_blocks():
+    """连续 assistant 消息应合并，并保持文本与工具调用的内容顺序。"""
+    request = OpenAIChatCompletionRequest(
+        model="360-glm-5.2",
+        messages=[
+            {"role": "user", "content": "查询天气"},
+            {"role": "assistant", "content": "我来查询。"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "weather",
+                            "arguments": '{"city":"北京"}',
+                        },
+                    }
+                ],
+            },
+        ],
+    )
+
+    result = convert_openai_to_claude_request(request)
+
+    assert result["messages"] == [
+        {"role": "user", "content": "查询天气"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "我来查询。"},
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "weather",
+                    "input": {"city": "北京"},
+                },
+            ],
+        },
+    ]
+
+
 def test_convert_claude_response_to_openai_chat_completion_with_thinking_and_tool_use():
     """Claude Messages 响应应转换为 Chat Completions 响应。"""
     claude_response = {
