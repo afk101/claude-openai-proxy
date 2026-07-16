@@ -70,7 +70,12 @@ def test_chat_completions_endpoint_converts_request_and_response(monkeypatch, ca
     )
 
     assert response.status_code == 200
-    assert captured["request"]["system"] == "中文回答"
+    assert captured["request"]["system"] == [
+        {
+            "type": "text",
+            "text": "中文回答",
+        }
+    ]
     assert captured["request"]["messages"] == [{"role": "user", "content": "你好"}]
     assert captured["request"]["model"] == "claude-4.8-opus"
     payload = response.json()

@@ -117,7 +117,12 @@ def test_convert_openai_request_to_claude_request_with_tools_and_tool_results():
     result = convert_openai_to_claude_request(request)
 
     assert result["model"] == "custom-upstream-model"
-    assert result["system"] == "你是严格的助手。"
+    assert result["system"] == [
+        {
+            "type": "text",
+            "text": "你是严格的助手。",
+        }
+    ]
     assert result["max_tokens"] == 256
     assert result["temperature"] == 0.2
     assert result["tools"] == [

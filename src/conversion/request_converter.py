@@ -59,11 +59,15 @@ def resolve_max_tokens(request: OpenAIChatCompletionRequest) -> int:
     return Constants.DEFAULT_MAX_TOKENS
 
 
-def merge_system_messages(messages: List[Dict[str, Any]]) -> Optional[str]:
-    """合并 OpenAI system 消息为 Claude 顶层 system。"""
+def merge_system_messages(
+    messages: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, str]]]:
+    """合并 OpenAI system 消息为 Claude 顶层 text 内容块。"""
     parts = [content_to_text(message.get("content")) for message in messages]
     text = "\n\n".join(part for part in parts if part)
-    return text or None
+    if not text:
+        return None
+    return [{"type": Constants.CONTENT_TEXT, "text": text}]
 
 
 def convert_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
