@@ -41,3 +41,12 @@ class Constants:
     DEFAULT_MAX_TOKENS = 128000
     DEFAULT_PORT = 7072
     MAX_ERROR_LOG_DETAIL_LENGTH = 1000
+
+    STREAM_DONE_EVENT = "data: [DONE]\n\n"
+    STREAM_ERROR_TYPE = "upstream_stream_error"
+    STREAM_ERROR_TIMEOUT_CODE = "upstream_timeout"
+    STREAM_ERROR_CONNECTION_CODE = "upstream_connection_error"
+    STREAM_ERROR_CONVERSION_CODE = "stream_conversion_error"
+    STREAM_ERROR_TIMEOUT_MESSAGE = "上游流式响应超时，请稍后重试。"
+    STREAM_ERROR_CONNECTION_MESSAGE = "上游流式连接中断，请稍后重试。"
+    STREAM_ERROR_CONVERSION_MESSAGE = "流式响应转换失败，请稍后重试。"
