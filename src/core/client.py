@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, Optional
 
 import httpx
 from fastapi import HTTPException
@@ -11,6 +11,44 @@ from fastapi import HTTPException
 from src.core.constants import Constants
 
 logger = logging.getLogger(__name__)
+
+
+class OpenedClaudeStream:
+    """持有已连接的 Claude SSE 响应，并负责幂等释放资源。"""
+
+    def __init__(
+        self,
+        response: httpx.Response,
+        http_client: httpx.AsyncClient,
+        cancel_event: Optional[asyncio.Event],
+        on_close: Callable[[], None],
+    ) -> None:
+        self.response = response
+        self.http_client = http_client
+        self.cancel_event = cancel_event
+        self.on_close = on_close
+        self.closed = False
+
+    async def iter_lines(self) -> AsyncGenerator[str, None]:
+        """逐行读取上游 SSE，并在收到取消信号后停止。"""
+        async for line in self.response.aiter_lines():
+            if self.cancel_event and self.cancel_event.is_set():
+                break
+            if line:
+                yield f"{line}\n"
+
+    async def aclose(self) -> None:
+        """幂等关闭上游响应、HTTP 客户端与活动请求状态。"""
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            await self.response.aclose()
+        finally:
+            try:
+                await self.http_client.aclose()
+            finally:
+                self.on_close()
 
 
 class ClaudeClient:
@@ -23,6 +61,7 @@ class ClaudeClient:
         anthropic_version: str,
         request_timeout: int = 90,
         read_timeout: int = 480,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -33,16 +72,14 @@ class ClaudeClient:
             write=request_timeout,
             pool=request_timeout,
         )
+        self.transport = transport
         self.active_requests: Dict[str, asyncio.Event] = {}
 
     async def create_message(
         self, claude_request: Dict[str, Any], request_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """发送非流式 Claude Messages 请求，支持取消。"""
-        cancel_event: Optional[asyncio.Event] = None
-        if request_id:
-            cancel_event = asyncio.Event()
-            self.active_requests[request_id] = cancel_event
+        cancel_event = self._register_active_request(request_id)
 
         try:
             task = asyncio.create_task(self._post_message(claude_request, request_id))
@@ -68,14 +105,13 @@ class ClaudeClient:
             return await task
 
         finally:
-            if request_id and request_id in self.active_requests:
-                del self.active_requests[request_id]
+            self._remove_active_request(request_id)
 
     async def _post_message(
         self, claude_request: Dict[str, Any], request_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """发送非流式请求的底层实现。"""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with self._create_http_client() as client:
             response = await client.post(
                 self.build_messages_url(),
                 headers=self.build_headers(request_id),
@@ -85,33 +121,37 @@ class ClaudeClient:
 
     async def create_message_stream(
         self, claude_request: Dict[str, Any], request_id: Optional[str] = None
-    ) -> AsyncGenerator[str, None]:
-        """发送流式 Claude Messages 请求，并透传 SSE 行，支持取消。"""
-        cancel_event: Optional[asyncio.Event] = None
-        if request_id:
-            cancel_event = asyncio.Event()
-            self.active_requests[request_id] = cancel_event
-
+    ) -> OpenedClaudeStream:
+        """连接并校验流式 Claude Messages 请求，成功后返回已打开的流。"""
+        cancel_event = self._register_active_request(request_id)
+        http_client = self._create_http_client()
+        response: Optional[httpx.Response] = None
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                async with client.stream(
-                    "POST",
-                    self.build_messages_url(),
-                    headers=self.build_headers(request_id),
-                    json=claude_request,
-                ) as response:
-                    if response.status_code >= 400:
-                        detail = await response.aread()
-                        raise HTTPException(status_code=response.status_code, detail=detail.decode("utf-8"))
-                    async for line in response.aiter_lines():
-                        if request_id and request_id in self.active_requests:
-                            if self.active_requests[request_id].is_set():
-                                break
-                        if line:
-                            yield f"{line}\n"
-        finally:
-            if request_id and request_id in self.active_requests:
-                del self.active_requests[request_id]
+            upstream_request = http_client.build_request(
+                "POST",
+                self.build_messages_url(),
+                headers=self.build_headers(request_id),
+                json=claude_request,
+            )
+            response = await http_client.send(upstream_request, stream=True)
+            if response.status_code >= 400:
+                await response.aread()
+                self.raise_for_error_response(response)
+            return OpenedClaudeStream(
+                response,
+                http_client,
+                cancel_event,
+                lambda: self._remove_active_request(request_id),
+            )
+        except httpx.TimeoutException as exc:
+            await self._close_failed_stream(response, http_client, request_id)
+            raise HTTPException(status_code=504, detail="连接上游服务超时。请稍后重试。") from exc
+        except httpx.RequestError as exc:
+            await self._close_failed_stream(response, http_client, request_id)
+            raise HTTPException(status_code=502, detail="连接上游服务失败。请稍后重试。") from exc
+        except Exception:
+            await self._close_failed_stream(response, http_client, request_id)
+            raise
 
     def cancel_request(self, request_id: str) -> bool:
         """取消一个活跃的请求。"""
@@ -123,6 +163,9 @@ class ClaudeClient:
     def classify_claude_error(self, error_detail: str) -> str:
         """根据 Claude 错误内容提供分类和友好提示。"""
         error_lower = str(error_detail).lower()
+
+        if "quota exhausted" in error_lower:
+            return "上游 API Key 配额耗尽。请更换可用密钥或等待配额恢复。"
 
         if any(
             keyword in error_lower
@@ -182,19 +225,59 @@ class ClaudeClient:
 
     def parse_json_response(self, response: httpx.Response) -> Dict[str, Any]:
         """解析上游 JSON 响应。"""
-        if response.status_code >= 400:
-            error_message = self._extract_error_message(response)
-            logger.warning(
-                "claude_upstream_error status_code=%s detail=%s",
-                response.status_code,
-                sanitize_error_detail_for_log(error_message, self.api_key),
-            )
-            friendly_message = self.classify_claude_error(error_message)
-            raise HTTPException(status_code=response.status_code, detail=friendly_message)
+        self.raise_for_error_response(response)
         try:
             return response.json()
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=502, detail="Claude upstream returned invalid JSON") from exc
+
+    def raise_for_error_response(self, response: httpx.Response) -> None:
+        """解析并抛出上游 HTTP 错误。"""
+        if response.status_code < 400:
+            return
+        error_message = self._extract_error_message(response)
+        logger.warning(
+            "claude_upstream_error status_code=%s detail=%s",
+            response.status_code,
+            sanitize_error_detail_for_log(error_message, self.api_key),
+        )
+        friendly_message = self.classify_claude_error(error_message)
+        raise HTTPException(status_code=response.status_code, detail=friendly_message)
+
+    def _create_http_client(self) -> httpx.AsyncClient:
+        """创建使用统一超时和可选传输层的异步 HTTP 客户端。"""
+        return httpx.AsyncClient(timeout=self.timeout, transport=self.transport)
+
+    def _register_active_request(
+        self, request_id: Optional[str]
+    ) -> Optional[asyncio.Event]:
+        """注册活动请求并返回对应取消事件。"""
+        if not request_id:
+            return None
+        cancel_event = asyncio.Event()
+        self.active_requests[request_id] = cancel_event
+        return cancel_event
+
+    def _remove_active_request(self, request_id: Optional[str]) -> None:
+        """移除活动请求状态。"""
+        if request_id:
+            self.active_requests.pop(request_id, None)
+
+    async def _close_failed_stream(
+        self,
+        response: Optional[httpx.Response],
+        http_client: httpx.AsyncClient,
+        request_id: Optional[str],
+    ) -> None:
+        """释放未成功返回给调用方的流式请求资源。"""
+        try:
+            if response is not None:
+                await response.aclose()
+        finally:
+            try:
+                await http_client.aclose()
+            finally:
+                self._remove_active_request(request_id)
 
     def _extract_error_message(self, response: httpx.Response) -> str:
         """从 Claude 错误响应中提取错误信息。"""
