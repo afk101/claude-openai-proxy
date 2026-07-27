@@ -25,7 +25,7 @@ def test_resolve_max_tokens_uses_generic_default_for_arbitrary_model():
     """任意模型未传输出上限时，应使用统一默认值而非模型映射。"""
     request = OpenAIChatCompletionRequest(model="custom-upstream-model", messages=[])
 
-    assert resolve_max_tokens(request) == 128000
+    assert resolve_max_tokens(request) == 64000
 
 
 def test_convert_openai_request_preserves_arbitrary_model_for_upstream():
