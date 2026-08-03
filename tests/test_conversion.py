@@ -434,6 +434,58 @@ def test_convert_claude_streaming_to_openai_chat_completion_chunks():
     }
 
 
+def test_convert_claude_streaming_reads_input_tokens_from_message_delta():
+    """兼容在 message_delta 中返回完整 usage 的 Claude 兼容上游。"""
+
+    async def run_stream_conversion():
+        async def claude_stream():
+            events = [
+                {
+                    "type": "message_start",
+                    "message": {
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                        }
+                    },
+                },
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {
+                        "input_tokens": 5091,
+                        "output_tokens": 5,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 4864,
+                    },
+                },
+                {"type": "message_stop"},
+            ]
+            for event in events:
+                yield f"data: {json.dumps(event)}\n\n"
+
+        request = OpenAIChatCompletionRequest(
+            model="wis-ultra",
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=16,
+            stream=True,
+        )
+        return [
+            chunk async for chunk in convert_claude_streaming_to_openai(claude_stream(), request)
+        ]
+
+    chunks = asyncio.run(run_stream_conversion())
+    final_chunk = json.loads(chunks[-2].removeprefix("data: "))
+
+    assert final_chunk["usage"] == {
+        "prompt_tokens": 5091,
+        "completion_tokens": 5,
+        "total_tokens": 5096,
+    }
+
+
 def test_convert_claude_streaming_marks_tool_calls_when_upstream_ends_turn():
     """流式工具调用即使上游以 end_turn 结束也应标记 tool_calls。"""
     async def run_stream_conversion():

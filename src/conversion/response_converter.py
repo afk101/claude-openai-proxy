@@ -240,15 +240,21 @@ def log_stream_conversion_summary(state: Dict[str, Any], request_id: Optional[st
 
 
 def update_usage_from_message_start(event: Dict[str, Any], state: Dict[str, Any]) -> None:
-    """从 message_start 更新输入 token。"""
+    """从 message_start 更新流式 token 用量。"""
     message = event.get("message") or {}
     usage = message.get("usage") or {}
-    state["prompt_tokens"] = int(usage.get("input_tokens") or state["prompt_tokens"])
+    merge_stream_usage(usage, state)
 
 
 def update_usage_from_message_delta(event: Dict[str, Any], state: Dict[str, Any]) -> None:
-    """从 message_delta 更新输出 token。"""
+    """从 message_delta 更新流式 token 用量。"""
     usage = event.get("usage") or {}
+    merge_stream_usage(usage, state)
+
+
+def merge_stream_usage(usage: Dict[str, Any], state: Dict[str, Any]) -> None:
+    """将 Claude 流式 usage 合并到 OpenAI token 状态。"""
+    state["prompt_tokens"] = int(usage.get("input_tokens") or state["prompt_tokens"])
     state["completion_tokens"] = int(usage.get("output_tokens") or state["completion_tokens"])
 
 
