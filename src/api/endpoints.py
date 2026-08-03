@@ -17,6 +17,7 @@ from src.conversion.response_converter import (
 from src.core.client import ClaudeClient, OpenedClaudeStream
 from src.core.config import config
 from src.core.constants import Constants
+from src.core.request_context import resolve_request_context
 from src.models.openai import OpenAIChatCompletionRequest
 
 router = APIRouter()
@@ -57,6 +58,7 @@ async def create_chat_completion(
 ):
     """OpenAI Chat Completions 兼容入口。"""
     request_id = str(uuid.uuid4())
+    request_context = resolve_request_context(http_request.headers)
     logger.info(
         "chat_completion_received request_id=%s model=%s stream=%s message_count=%s tool_count=%s",
         request_id,
@@ -79,7 +81,9 @@ async def create_chat_completion(
 
     if request.stream:
         claude_request["stream"] = True
-        opened_stream = await claude_client.create_message_stream(claude_request, request_id)
+        opened_stream = await claude_client.create_message_stream(
+            claude_request, request_id, request_context
+        )
         logger.info("chat_completion_stream_started request_id=%s", request_id)
         return StreamingResponse(
             _stream_with_disconnect_check(opened_stream, request, http_request, request_id),
@@ -87,7 +91,9 @@ async def create_chat_completion(
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    claude_response = await claude_client.create_message(claude_request, request_id)
+    claude_response = await claude_client.create_message(
+        claude_request, request_id, request_context
+    )
     logger.info("chat_completion_completed request_id=%s", request_id)
     return convert_claude_response_to_openai(claude_response, request)
 async def _stream_with_disconnect_check(

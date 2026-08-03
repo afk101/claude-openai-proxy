@@ -42,6 +42,11 @@ class Constants:
     DEFAULT_PORT = 7072
     MAX_ERROR_LOG_DETAIL_LENGTH = 1000
 
+    HEADER_CLIENT_SOURCE = "x-src"
+    HEADER_CLIENT_TASK_ID = "x-client-task-id"
+    HEADER_CLIENT_TRACE_ID = "x-client-trace-id"
+    CLIENT_SOURCE_IDE = "ide"
+
     STREAM_DONE_EVENT = "data: [DONE]\n\n"
     STREAM_ERROR_TYPE = "upstream_stream_error"
     STREAM_ERROR_TIMEOUT_CODE = "upstream_timeout"

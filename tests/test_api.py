@@ -1,6 +1,7 @@
 """OpenAI 兼容接口测试。"""
 
 import logging
+import re
 
 import httpx
 import pytest
@@ -28,11 +29,62 @@ class FakeOpenedStream:
         self.close_count += 1
 
 
+def build_successful_upstream_response(stream):
+    """构造可供流式与非流式端点消费的成功上游响应。"""
+    if stream:
+        return httpx.Response(
+            200,
+            content=(
+                'data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}\n\n'
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n'
+                'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n'
+                'data: {"type":"message_stop"}\n\n'
+            ),
+        )
+    return httpx.Response(
+        200,
+        json={
+            "id": "msg_context",
+            "type": "message",
+            "role": "assistant",
+            "model": "test-model",
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    )
+
+
+def post_and_capture_upstream(monkeypatch, *, stream, headers=None, upstream_api_key=None):
+    """从公开端点发起请求并捕获真实上游 HTTP Header。"""
+    captured = {}
+
+    async def handler(request):
+        captured["headers"] = request.headers
+        return build_successful_upstream_response(stream)
+
+    import src.api.endpoints as endpoints
+
+    if upstream_api_key is not None:
+        monkeypatch.setattr(endpoints.claude_client, "api_key", upstream_api_key)
+    monkeypatch.setattr(endpoints.claude_client, "transport", httpx.MockTransport(handler))
+    response = TestClient(app).post(
+        "/v1/chat/completions",
+        headers=headers,
+        json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": stream,
+        },
+    )
+    return response, captured["headers"]
+
+
 def test_chat_completions_endpoint_accepts_arbitrary_model_with_default_token_budget(monkeypatch):
     """接口应接受任意模型，并在未传上限时使用统一默认值。"""
     captured = {}
 
-    async def fake_create_message(claude_request, request_id=None):
+    async def fake_create_message(claude_request, request_id=None, request_context=None):
         captured["request"] = claude_request
         return {
             "content": [{"type": "text", "text": "你好"}],
@@ -60,7 +112,7 @@ def test_chat_completions_endpoint_converts_request_and_response(monkeypatch, ca
     caplog.set_level(logging.INFO)
     captured = {}
 
-    async def fake_create_message(claude_request, request_id=None):
+    async def fake_create_message(claude_request, request_id=None, request_context=None):
         captured["request"] = claude_request
         captured["request_id"] = request_id
         return {
@@ -111,6 +163,91 @@ def test_chat_completions_endpoint_converts_request_and_response(monkeypatch, ca
     assert any("chat_completion_upstream_request" in record.message for record in caplog.records)
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_endpoint_preserves_client_context_headers(monkeypatch, stream):
+    """上游请求应声明 IDE 来源并保留大小写无关的客户端上下文。"""
+    response, captured_headers = post_and_capture_upstream(
+        monkeypatch,
+        stream=stream,
+        headers={
+            "x-ClIeNt-TaSk-Id": "client-task-1",
+            "X-cLiEnT-tRaCe-Id": "client-trace-1",
+            "X-Unrelated-Header": "must-not-forward",
+        },
+    )
+    assert response.status_code == 200
+    assert captured_headers["x-src"] == "ide"
+    assert captured_headers["x-client-task-id"] == "client-task-1"
+    assert captured_headers["x-client-trace-id"] == "client-trace-1"
+    assert "x-unrelated-header" not in captured_headers
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_endpoint_generates_distinct_missing_context_ids(monkeypatch, stream):
+    """客户端未提供上下文时应分别生成格式一致且不同的任务与追踪标识。"""
+    response, captured_headers = post_and_capture_upstream(monkeypatch, stream=stream)
+    task_id = captured_headers["x-client-task-id"]
+    trace_id = captured_headers["x-client-trace-id"]
+    assert response.status_code == 200
+    assert re.fullmatch(r"[0-9a-f]{32}", task_id)
+    assert re.fullmatch(r"[0-9a-f]{32}", trace_id)
+    assert task_id != trace_id
+
+
+@pytest.mark.parametrize(
+    ("stream", "headers", "preserved_header", "preserved_value", "generated_header"),
+    [
+        (stream, headers, preserved_header, preserved_value, generated_header)
+        for stream in [False, True]
+        for headers, preserved_header, preserved_value, generated_header in [
+            (
+                {"X-Client-Task-Id": "existing-task", "X-Client-Trace-Id": ""},
+                "x-client-task-id",
+                "existing-task",
+                "x-client-trace-id",
+            ),
+            (
+                {"X-Client-Task-Id": "   ", "X-Client-Trace-Id": "existing-trace"},
+                "x-client-trace-id",
+                "existing-trace",
+                "x-client-task-id",
+            ),
+        ]
+    ],
+)
+def test_endpoint_only_generates_missing_context_id(
+    monkeypatch,
+    stream,
+    headers,
+    preserved_header,
+    preserved_value,
+    generated_header,
+):
+    """仅缺失的上下文字段应生成新值，已有字段必须保持不变。"""
+    response, captured_headers = post_and_capture_upstream(
+        monkeypatch,
+        stream=stream,
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert captured_headers[preserved_header] == preserved_value
+    assert re.fullmatch(r"[0-9a-f]{32}", captured_headers[generated_header])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_endpoint_keeps_upstream_auth_proxy_controlled(monkeypatch, stream):
+    """入站鉴权不得覆盖代理配置的上游鉴权。"""
+    response, captured_headers = post_and_capture_upstream(
+        monkeypatch,
+        stream=stream,
+        headers={"Authorization": "Bearer inbound-client-key"},
+        upstream_api_key="configured-upstream-key",
+    )
+    assert response.status_code == 200
+    assert captured_headers["authorization"] == "Bearer configured-upstream-key"
+    assert captured_headers["x-api-key"] == "configured-upstream-key"
+
+
 @pytest.mark.parametrize(
     ("status_code", "detail"),
     [
@@ -126,7 +263,7 @@ def test_streaming_endpoint_returns_upstream_status_before_response_starts(
 ):
     """预连接 HTTP 错误应保留状态码，而不是先返回 200。"""
 
-    async def fake_create_message_stream(claude_request, request_id=None):
+    async def fake_create_message_stream(claude_request, request_id=None, request_context=None):
         raise HTTPException(status_code=status_code, detail=detail)
 
     import src.api.endpoints as endpoints
@@ -159,7 +296,7 @@ def test_streaming_endpoint_emits_error_event_after_stream_timeout(
         exception=httpx.ReadTimeout("upstream read timed out")
     )
 
-    async def fake_create_message_stream(claude_request, request_id=None):
+    async def fake_create_message_stream(claude_request, request_id=None, request_context=None):
         return opened_stream
 
     import src.api.endpoints as endpoints
@@ -205,7 +342,7 @@ def test_streaming_endpoint_preserves_successful_stream_and_closes_resources(mon
         ]
     )
 
-    async def fake_create_message_stream(claude_request, request_id=None):
+    async def fake_create_message_stream(claude_request, request_id=None, request_context=None):
         return opened_stream
 
     import src.api.endpoints as endpoints

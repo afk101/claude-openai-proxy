@@ -9,6 +9,7 @@ import httpx
 from fastapi import HTTPException
 
 from src.core.constants import Constants
+from src.core.request_context import UpstreamRequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +77,18 @@ class ClaudeClient:
         self.active_requests: Dict[str, asyncio.Event] = {}
 
     async def create_message(
-        self, claude_request: Dict[str, Any], request_id: Optional[str] = None
+        self,
+        claude_request: Dict[str, Any],
+        request_id: Optional[str] = None,
+        request_context: Optional[UpstreamRequestContext] = None,
     ) -> Dict[str, Any]:
         """发送非流式 Claude Messages 请求，支持取消。"""
         cancel_event = self._register_active_request(request_id)
 
         try:
-            task = asyncio.create_task(self._post_message(claude_request, request_id))
+            task = asyncio.create_task(
+                self._post_message(claude_request, request_id, request_context)
+            )
             if cancel_event:
                 cancel_task = asyncio.create_task(cancel_event.wait())
                 done, pending = await asyncio.wait(
@@ -108,19 +114,25 @@ class ClaudeClient:
             self._remove_active_request(request_id)
 
     async def _post_message(
-        self, claude_request: Dict[str, Any], request_id: Optional[str] = None
+        self,
+        claude_request: Dict[str, Any],
+        request_id: Optional[str] = None,
+        request_context: Optional[UpstreamRequestContext] = None,
     ) -> Dict[str, Any]:
         """发送非流式请求的底层实现。"""
         async with self._create_http_client() as client:
             response = await client.post(
                 self.build_messages_url(),
-                headers=self.build_headers(request_id),
+                headers=self.build_headers(request_id, request_context),
                 json=claude_request,
             )
         return self.parse_json_response(response)
 
     async def create_message_stream(
-        self, claude_request: Dict[str, Any], request_id: Optional[str] = None
+        self,
+        claude_request: Dict[str, Any],
+        request_id: Optional[str] = None,
+        request_context: Optional[UpstreamRequestContext] = None,
     ) -> OpenedClaudeStream:
         """连接并校验流式 Claude Messages 请求，成功后返回已打开的流。"""
         cancel_event = self._register_active_request(request_id)
@@ -130,7 +142,7 @@ class ClaudeClient:
             upstream_request = http_client.build_request(
                 "POST",
                 self.build_messages_url(),
-                headers=self.build_headers(request_id),
+                headers=self.build_headers(request_id, request_context),
                 json=claude_request,
             )
             response = await http_client.send(upstream_request, stream=True)
@@ -210,17 +222,25 @@ class ClaudeClient:
         """构造 Claude Messages 请求地址。"""
         return f"{self.base_url}/v1/messages"
 
-    def build_headers(self, request_id: Optional[str] = None) -> Dict[str, str]:
+    def build_headers(
+        self,
+        request_id: Optional[str] = None,
+        request_context: Optional[UpstreamRequestContext] = None,
+    ) -> Dict[str, str]:
         """构造上游请求头。"""
         headers = {
             "content-type": "application/json",
             "anthropic-version": self.anthropic_version,
+            Constants.HEADER_CLIENT_SOURCE: Constants.CLIENT_SOURCE_IDE,
         }
         if self.api_key:
             headers["x-api-key"] = self.api_key
             headers["authorization"] = f"Bearer {self.api_key}"
         if request_id:
             headers["x-request-id"] = request_id
+        if request_context:
+            headers[Constants.HEADER_CLIENT_TASK_ID] = request_context.client_task_id
+            headers[Constants.HEADER_CLIENT_TRACE_ID] = request_context.client_trace_id
         return headers
 
     def parse_json_response(self, response: httpx.Response) -> Dict[str, Any]:
