@@ -61,3 +61,5 @@ class Constants:
     ZQI_RETRY_BACKOFF_SECONDS = 0.2
     ZQI_MAX_RETRIES = 1
     ZQI_FORWARD_URL = "https://llm.api.zyuncs.com/v1"
+    ZQI_INTERNAL_IDENTIFIER = "zyzj_package"
+    ZQI_EXTERNAL_IDENTIFIER = "sfdj_package"

@@ -24,9 +24,15 @@ def auth_payload(tmp_path: Path, **overrides):
     return path
 
 
-def package(model_name="pkg/model", package_id=1022, **overrides):
+def package(
+    model_name="pkg/model",
+    package_id=1022,
+    identifier="zyzj_package",
+    **overrides,
+):
     item = {
         "id": package_id,
+        "identifier": identifier,
         "expireAt": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
         "exhausted": False,
         "apiKey": {"full": "package-key"},
@@ -187,6 +193,88 @@ def test_resolves_package_route_and_preserves_model_name(tmp_path):
         assert route.headers["X-Pkg-Model"] == "1022"
         assert route.headers["X-Ai-Forward-Email"] == "user@example.test"
         assert route.model == "pkg/model"
+
+    asyncio.run(run())
+
+
+def test_prefers_internal_then_external_then_unknown_identifier(tmp_path):
+    async def run():
+        auth_path = auth_payload(tmp_path)
+        packages = [
+            package("pkg/model", 1, "unknown_package"),
+            package("pkg/model", 2, "sfdj_package"),
+            package("pkg/model", 3, "zyzj_package"),
+        ]
+
+        async def handler(request):
+            return httpx.Response(200, json=catalog_response(packages))
+
+        catalog = ZqiCatalogClient(auth_path=auth_path, transport=httpx.MockTransport(handler))
+        route = await ZqiRouteResolver(catalog).resolve("pkg/model")
+
+        assert route.headers["X-Pkg-Model"] == "3"
+
+    asyncio.run(run())
+
+
+def test_falls_back_in_identifier_priority_when_higher_priority_is_unavailable(tmp_path):
+    async def run():
+        auth_path = auth_payload(tmp_path)
+        packages = [
+            package("pkg/model", 1, "zyzj_package", exhausted=True),
+            package("pkg/model", 2, "sfdj_package"),
+            package("pkg/model", 3, "unknown_package"),
+        ]
+
+        async def handler(request):
+            return httpx.Response(200, json=catalog_response(packages))
+
+        catalog = ZqiCatalogClient(auth_path=auth_path, transport=httpx.MockTransport(handler))
+        route = await ZqiRouteResolver(catalog).resolve("pkg/model")
+
+        assert route.headers["X-Pkg-Model"] == "2"
+
+    asyncio.run(run())
+
+
+def test_checks_next_package_within_same_identifier(tmp_path):
+    async def run():
+        auth_path = auth_payload(tmp_path)
+        packages = [
+            package("pkg/model", 1, "zyzj_package", exhausted=True),
+            package("pkg/model", 2, "zyzj_package"),
+            package("pkg/model", 3, "sfdj_package"),
+        ]
+
+        async def handler(request):
+            return httpx.Response(200, json=catalog_response(packages))
+
+        catalog = ZqiCatalogClient(auth_path=auth_path, transport=httpx.MockTransport(handler))
+        route = await ZqiRouteResolver(catalog).resolve("pkg/model")
+
+        assert route.headers["X-Pkg-Model"] == "2"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [None, 123, ""],
+)
+def test_invalid_identifier_is_explicit(tmp_path, identifier):
+    async def run():
+        auth_path = auth_payload(tmp_path)
+        item = package("pkg/model", identifier=identifier)
+
+        async def handler(request):
+            return httpx.Response(200, json=catalog_response([item]))
+
+        catalog = ZqiCatalogClient(auth_path=auth_path, transport=httpx.MockTransport(handler))
+        with pytest.raises(HTTPException) as error:
+            await ZqiRouteResolver(catalog).resolve("pkg/model")
+
+        assert error.value.status_code == 502
+        assert "identifier" in str(error.value.detail)
 
     asyncio.run(run())
 

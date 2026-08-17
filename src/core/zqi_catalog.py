@@ -188,6 +188,12 @@ class ZqiCatalogClient:
         prefix = f"data.list[{package_index}]"
         if not isinstance(item, dict):
             raise HTTPException(status_code=502, detail=f"{prefix} 类型错误：期望 object")
+        identifier = item.get("identifier")
+        if not isinstance(identifier, str) or not identifier.strip():
+            raise HTTPException(
+                status_code=502,
+                detail=f"{prefix}.identifier 缺失、为空或类型错误：期望非空 string",
+            )
         if "id" not in item or item["id"] is None or not self._header_value(item["id"]):
             raise HTTPException(status_code=502, detail=f"{prefix}.id 缺失或无法转换为单值 Header")
         expire_at = item.get("expireAt")
@@ -263,28 +269,15 @@ class ZqiRouteResolver:
             raise HTTPException(status_code=400, detail=f"模型 {model} 不支持 messages 协议")
 
         now = self.catalog.now()
-        candidates = []
         reasons = []
-        for package, model_item in messages_matches:
-            enabled = model_item.get("enabled") is not False
-            exhausted = package.get("exhausted") is True
-            expire_at = _parse_expire_at(package["expireAt"])
-            if expire_at <= now:
-                reasons.append("套餐已过期")
-                continue
-            if exhausted:
-                reasons.append("套餐额度已耗尽")
-                continue
-            if not enabled:
-                reasons.append("模型已禁用")
-                continue
-            candidates.append((package, model_item, expire_at))
-        if not candidates:
+        selected = self._select_package(messages_matches, now, reasons)
+        if selected is None:
             reason = "、".join(dict.fromkeys(reasons)) or "没有可用套餐"
-            raise HTTPException(status_code=503, detail=f"模型 {model} 在智企套餐中存在，但当前不可用：{reason}")
-
-        selected = max(candidates, key=lambda item: item[2])
-        package, _, _ = selected
+            raise HTTPException(
+                status_code=503,
+                detail=f"模型 {model} 在智企套餐中存在，但当前不可用：{reason}",
+            )
+        package, _ = selected
         auth = snapshot.auth
         headers = {
             "X-Ai-Forward-Url": Constants.ZQI_FORWARD_URL,
@@ -294,6 +287,65 @@ class ZqiRouteResolver:
         if mail and len(mail) <= 320 and "\r" not in mail and "\n" not in mail and "@" in mail:
             headers["X-Ai-Forward-Email"] = mail
         return ZqiRoute(model, package["apiKey"]["full"], headers)
+
+    def _select_package(
+        self,
+        matches: List[Tuple[Mapping[str, Any], Mapping[str, Any]]],
+        now: datetime,
+        reasons: List[str],
+    ) -> Optional[Tuple[Mapping[str, Any], Mapping[str, Any]]]:
+        """按内网、外网、未知类型的顺序选择第一个可用套餐。"""
+        priority_identifiers = (
+            Constants.ZQI_INTERNAL_IDENTIFIER,
+            Constants.ZQI_EXTERNAL_IDENTIFIER,
+        )
+        for identifier in priority_identifiers:
+            selected = self._select_from_identifier(
+                matches, identifier, now, reasons
+            )
+            if selected is not None:
+                return selected
+
+        unknown_matches = [
+            match
+            for match in matches
+            if match[0]["identifier"] not in priority_identifiers
+        ]
+        return self._select_from_matches(unknown_matches, now, reasons)
+
+    def _select_from_identifier(
+        self,
+        matches: List[Tuple[Mapping[str, Any], Mapping[str, Any]]],
+        identifier: str,
+        now: datetime,
+        reasons: List[str],
+    ) -> Optional[Tuple[Mapping[str, Any], Mapping[str, Any]]]:
+        """按目录顺序检查指定 identifier 下的套餐。"""
+        grouped_matches = [
+            match for match in matches if match[0]["identifier"] == identifier
+        ]
+        return self._select_from_matches(grouped_matches, now, reasons)
+
+    @staticmethod
+    def _select_from_matches(
+        matches: List[Tuple[Mapping[str, Any], Mapping[str, Any]]],
+        now: datetime,
+        reasons: List[str],
+    ) -> Optional[Tuple[Mapping[str, Any], Mapping[str, Any]]]:
+        """按目录顺序返回第一个满足状态条件的套餐。"""
+        for package, model_item in matches:
+            expire_at = _parse_expire_at(package["expireAt"])
+            if expire_at <= now:
+                reasons.append("套餐已过期")
+                continue
+            if package.get("exhausted") is True:
+                reasons.append("套餐额度已耗尽")
+                continue
+            if model_item.get("enabled") is False:
+                reasons.append("模型已禁用")
+                continue
+            return package, model_item
+        return None
 
 
 def _parse_expire_at(value: str) -> datetime:
