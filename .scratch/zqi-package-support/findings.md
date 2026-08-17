@@ -103,6 +103,35 @@
 - `claude-openai-proxy` 不增加 `/v1/responses`，不在本仓库适配 Codex Responses；Codex 不属于本次改造范围。
 - 套餐模型映射使用 exact model name；显式 `.env` JSON 覆盖暂不纳入本轮范围。
 
+## Follow-up Design: Identifier Priority Routing
+
+- 用户确认同一模型的套餐选择不再按 `expireAt` 排序，而是按 `identifier` 优先级：`zyzj_package`（内网）优先，`sfdj_package`（外网）其次；未知 `identifier` 作为最后兜底，仅当前两类均没有可用套餐时才参与选择。
+- 用户确认未知 `identifier` 不应直接报错或被完全忽略；它们保留为最低优先级候选。
+- 用户确认同一优先级内多个套餐按目录返回顺序依次检查；当前套餐 `exhausted=true`、模型 `enabled=false` 或不支持 `messages` 时，继续检查同优先级的后续套餐；同优先级全部不可用后再进入下一个 identifier 优先级。
+- 用户确认 `expireAt` 不再参与套餐优先级排序，但仍校验 ISO 8601 格式；已过期套餐仍视为不可用，不能发送其套餐 key。
+
+### Confirmed Identifier Priority Contract
+
+```text
+zyzj_package (内网) -> sfdj_package (外网) -> unknown identifier (最后兜底)
+```
+
+- 模型匹配仍使用完整模型名 exact match。
+- 每个优先级内按目录返回顺序检查套餐，找到第一个可用套餐即停止。
+- 当前套餐不可用时继续检查同优先级后续套餐，再进入下一优先级。
+- 可用性仍要求：支持 `messages`、模型未显式禁用、套餐未耗尽、套餐未过期、套餐 key 合法。
+- 三个优先级都没有可用套餐时返回明确的 `503`，不回退普通 `.env`。
+- 用户确认套餐 `identifier` 缺失时直接视为目录契约错误并报错，不归入未知 identifier 兜底，也不继续尝试其他套餐。
+- 用户确认套餐 `identifier` 为 `null`、非字符串或空字符串时，同样按目录契约错误直接报错；只有非空字符串且不是 `zyzj_package`/`sfdj_package` 的值，才属于最后兜底的未知 identifier。
+
+### Remaining Identifier Contract Boundary
+
+- 用户确认额度耗尽只依据套餐顶层 `exhausted` 字段判断，不自行读取或推导 `quotas[].used`/`total`；`exhausted=true` 不可用，`false` 可用，`null`/缺失沿用既定兼容规则按未耗尽处理。
+
+### Identifier Priority Design Complete
+
+- 设计访谈中关于 identifier 优先级、同优先级遍历、过期判断、identifier 契约和额度来源的决策已全部确认，后续应据此更新 spec、issues 和实现。
+
 ## Resources
 - `/Users/qihoo/Documents/A_Own/claude-openai-proxy/src/api/endpoints.py`
 - `/Users/qihoo/Documents/A_Own/claude-openai-proxy/src/core/client.py`

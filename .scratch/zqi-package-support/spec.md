@@ -39,19 +39,21 @@ https://{host}/api/zqi/model-packages?include_limit=true&include_keys=true&inclu
 - REQ-02：代理只读取 `$HOME/.wiscode/auth.json`；顶层必须是 object，`host` 和非空字符串 `access_token` 为必需字段，`mail` 可选。
 - REQ-03：目录 URL 固定为 `https://{host}/api/zqi/model-packages?include_limit=true&include_keys=true&include_models=true`；host 只允许 hostname 和可选端口。
 - REQ-04：目录成功必须是 HTTP 2xx、`context.code === 0`、`data` 为 object、`data.list` 为 array；空数组是合法空目录。
-- REQ-05：路由字段必须完整合法：套餐 `id` 可转为单值 Header 字符串、`expireAt` 可解析为 ISO 8601、`exhausted` 为 boolean 或 null、`apiKey.full` 为非空字符串、`models` 为 array；模型 `name` 为字符串、`apiNames` 为 array、`enabled` 为 boolean 或 null/缺失。
+- REQ-05：路由字段必须完整合法：套餐 `identifier` 为非空字符串、`id` 可转为单值 Header 字符串、`expireAt` 可解析为 ISO 8601、`exhausted` 为 boolean 或 null、`apiKey.full` 为非空字符串、`models` 为 array；模型 `name` 为字符串、`apiNames` 为 array、`enabled` 为 boolean 或 null/缺失。
 - REQ-06：任何路由字段结构错误、重复完整模型名或套餐项非 object 都使目录快照无效，返回 502，detail 指出字段路径、期望和实际；不缓存、不回退。
 - REQ-07：`exhausted === true` 表示耗尽；false/null 表示未耗尽。`enabled === false` 表示禁用；true/null/缺失按启用。
 - REQ-08：每次请求按完整模型名 exact match；完全未出现才走普通 `.env`。
 - REQ-09：出现模型但 `apiNames` 合法且所有项都不含 `messages` 返回 400；字段缺失/类型错误返回 502。
 - REQ-10：支持 messages 但无有效套餐返回 503，detail 区分过期、耗尽、禁用、key 缺失或无可用套餐。
-- REQ-11：多个有效套餐按 `expireAt` 降序选择；相同时间保持目录返回顺序；不比较或去重 key/id。
+- REQ-11：同一模型的套餐按 `identifier` 优先级选择：`zyzj_package`（内网）优先，`sfdj_package`（外网）其次，其他非空 identifier 最后兜底；每个优先级内按目录返回顺序选择第一个可用套餐，不使用 `expireAt` 排序，不比较或去重 key/id。
 - REQ-12：命中套餐时请求体 model 保持原值；`x-api-key` 与 `Authorization` 使用 `apiKey.full`，增加 `X-Ai-Forward-Url=https://llm.api.zyuncs.com/v1`、`X-Pkg-Model=String(package.id)`，合法 mail 时增加 `X-Ai-Forward-Email`；不携带普通 key。
 - REQ-13：未命中套餐时保持现有普通 headers，不增加智企 headers；实际连接地址始终为 `{CLAUDE_BASE_URL}/v1/messages`。
 - REQ-14：每次请求使用不可变请求级 route；流式和非流式使用同一 route，不能修改全局 client 配置。
 - REQ-15：缓存 TTL 为 1800 秒；每次请求读取 auth.json 并以 host/access_token 指纹检测变化；变化立即刷新。刷新 single-flight，旧认证结果不得覆盖新缓存；刷新失败清除旧快照。
 - REQ-16：目录网络错误/超时单次 10 秒，最多重试一次，退避约 200ms；401、非 JSON、契约错误和其他 HTTP 错误不重试。
 - REQ-17：auth 文件错误按 500/401；目录上游网络/响应错误按 502；协议不支持 400；套餐业务不可用 503。错误只返回详细 `detail`，敏感字段不回显。
+- REQ-18：套餐缺失、null、非字符串或空字符串 `identifier` 时返回 502，detail 指出完整字段路径；未知但非空字符串 identifier 允许作为最后兜底。
+- REQ-19：`expireAt` 仍校验 ISO 8601 且过期套餐不可用，但不参与套餐优先级排序；额度状态只使用顶层 `exhausted`，不根据 `quotas` 自行推导。
 
 ## Scenarios
 
@@ -67,6 +69,9 @@ https://{host}/api/zqi/model-packages?include_limit=true&include_keys=true&inclu
 - SCN-10 Given mail 缺失或不符合 aiproxy 规则，When 命中套餐，Then 省略 X-Ai-Forward-Email，其他套餐请求继续。
 - SCN-11 Given多个有效套餐，When expireAt 不同/相同，Then 分别选更晚者/返回顺序第一者。
 - SCN-12 Given并发普通与套餐请求，When 同时发出，Then两者不串用 key、URL 或 headers。
+- SCN-13 Given模型同时存在于内网、外网和未知 identifier 套餐，When 内网有可用套餐，Then 使用内网；内网全部不可用后使用外网；两者都不可用后使用未知套餐。
+- SCN-14 Given同一 identifier 下有多个套餐，When 前一个套餐耗尽、过期或模型禁用，Then 按目录顺序检查下一个套餐。
+- SCN-15 Given套餐缺少或错误 identifier，When 刷新目录，Then 返回 502，不把该套餐归入未知 identifier。
 
 ## 关键决策
 
