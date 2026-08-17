@@ -9,6 +9,19 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.main import app
+from src.core.zqi_catalog import ZqiRoute
+
+
+@pytest.fixture(autouse=True)
+def stub_zqi_route_resolver(monkeypatch):
+    """让既有 endpoint 测试显式隔离目录服务，只验证原有协议转换行为。"""
+    import src.api.endpoints as endpoints
+
+    class DefaultRouteResolver:
+        async def resolve(self, model):
+            return None
+
+    monkeypatch.setattr(endpoints, "zqi_route_resolver", DefaultRouteResolver())
 
 
 class FakeOpenedStream:
@@ -84,7 +97,7 @@ def test_chat_completions_endpoint_accepts_arbitrary_model_with_default_token_bu
     """接口应接受任意模型，并在未传上限时使用统一默认值。"""
     captured = {}
 
-    async def fake_create_message(claude_request, request_id=None, request_context=None):
+    async def fake_create_message(claude_request, request_id=None, request_context=None, route=None):
         captured["request"] = claude_request
         return {
             "content": [{"type": "text", "text": "你好"}],
@@ -112,7 +125,7 @@ def test_chat_completions_endpoint_converts_request_and_response(monkeypatch, ca
     caplog.set_level(logging.INFO)
     captured = {}
 
-    async def fake_create_message(claude_request, request_id=None, request_context=None):
+    async def fake_create_message(claude_request, request_id=None, request_context=None, route=None):
         captured["request"] = claude_request
         captured["request_id"] = request_id
         return {
@@ -161,6 +174,39 @@ def test_chat_completions_endpoint_converts_request_and_response(monkeypatch, ca
     }
     assert any("chat_completion_received" in record.message for record in caplog.records)
     assert any("chat_completion_upstream_request" in record.message for record in caplog.records)
+
+
+def test_chat_completion_forwards_zqi_route_headers_without_default_key(monkeypatch):
+    """命中智企 route 时应按请求级数据替换认证并转发套餐头。"""
+    route = ZqiRoute(
+        model="pkg/model",
+        api_key="package-key",
+        headers={
+            "X-Ai-Forward-Url": "https://llm.api.zyuncs.com/v1",
+            "X-Ai-Forward-Email": "user@example.test",
+            "X-Pkg-Model": "1022",
+        },
+    )
+
+    import src.api.endpoints as endpoints
+
+    headers = endpoints.claude_client.build_headers(route=route)
+    assert headers["x-api-key"] == "package-key"
+    assert headers["authorization"] == "Bearer package-key"
+    assert headers["X-Ai-Forward-Url"] == "https://llm.api.zyuncs.com/v1"
+    assert "claude-default" not in headers.values()
+
+
+def test_empty_zqi_route_does_not_fall_back_to_default_key():
+    """目录明确返回普通 route 时不应错误携带默认上游密钥。"""
+    import src.api.endpoints as endpoints
+
+    headers = endpoints.claude_client.build_headers(
+        route=ZqiRoute(model="pkg/model", api_key=None, headers={})
+    )
+
+    assert "x-api-key" not in headers
+    assert "authorization" not in headers
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -263,7 +309,7 @@ def test_streaming_endpoint_returns_upstream_status_before_response_starts(
 ):
     """预连接 HTTP 错误应保留状态码，而不是先返回 200。"""
 
-    async def fake_create_message_stream(claude_request, request_id=None, request_context=None):
+    async def fake_create_message_stream(claude_request, request_id=None, request_context=None, route=None):
         raise HTTPException(status_code=status_code, detail=detail)
 
     import src.api.endpoints as endpoints
@@ -296,7 +342,7 @@ def test_streaming_endpoint_emits_error_event_after_stream_timeout(
         exception=httpx.ReadTimeout("upstream read timed out")
     )
 
-    async def fake_create_message_stream(claude_request, request_id=None, request_context=None):
+    async def fake_create_message_stream(claude_request, request_id=None, request_context=None, route=None):
         return opened_stream
 
     import src.api.endpoints as endpoints
@@ -342,7 +388,7 @@ def test_streaming_endpoint_preserves_successful_stream_and_closes_resources(mon
         ]
     )
 
-    async def fake_create_message_stream(claude_request, request_id=None, request_context=None):
+    async def fake_create_message_stream(claude_request, request_id=None, request_context=None, route=None):
         return opened_stream
 
     import src.api.endpoints as endpoints

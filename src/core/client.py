@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from src.core.constants import Constants
 from src.core.request_context import UpstreamRequestContext
+from src.core.zqi_catalog import ZqiRoute
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +82,14 @@ class ClaudeClient:
         claude_request: Dict[str, Any],
         request_id: Optional[str] = None,
         request_context: Optional[UpstreamRequestContext] = None,
+        route: Optional[ZqiRoute] = None,
     ) -> Dict[str, Any]:
         """发送非流式 Claude Messages 请求，支持取消。"""
         cancel_event = self._register_active_request(request_id)
 
         try:
             task = asyncio.create_task(
-                self._post_message(claude_request, request_id, request_context)
+                self._post_message(claude_request, request_id, request_context, route)
             )
             if cancel_event:
                 cancel_task = asyncio.create_task(cancel_event.wait())
@@ -118,21 +120,23 @@ class ClaudeClient:
         claude_request: Dict[str, Any],
         request_id: Optional[str] = None,
         request_context: Optional[UpstreamRequestContext] = None,
+        route: Optional[ZqiRoute] = None,
     ) -> Dict[str, Any]:
         """发送非流式请求的底层实现。"""
         async with self._create_http_client() as client:
             response = await client.post(
                 self.build_messages_url(),
-                headers=self.build_headers(request_id, request_context),
+                headers=self.build_headers(request_id, request_context, route),
                 json=claude_request,
             )
-        return self.parse_json_response(response)
+        return self.parse_json_response(response, route.api_key if route else None)
 
     async def create_message_stream(
         self,
         claude_request: Dict[str, Any],
         request_id: Optional[str] = None,
         request_context: Optional[UpstreamRequestContext] = None,
+        route: Optional[ZqiRoute] = None,
     ) -> OpenedClaudeStream:
         """连接并校验流式 Claude Messages 请求，成功后返回已打开的流。"""
         cancel_event = self._register_active_request(request_id)
@@ -142,13 +146,13 @@ class ClaudeClient:
             upstream_request = http_client.build_request(
                 "POST",
                 self.build_messages_url(),
-                headers=self.build_headers(request_id, request_context),
+                headers=self.build_headers(request_id, request_context, route),
                 json=claude_request,
             )
             response = await http_client.send(upstream_request, stream=True)
             if response.status_code >= 400:
                 await response.aread()
-                self.raise_for_error_response(response)
+                self.raise_for_error_response(response, route.api_key if route else None)
             return OpenedClaudeStream(
                 response,
                 http_client,
@@ -226,6 +230,7 @@ class ClaudeClient:
         self,
         request_id: Optional[str] = None,
         request_context: Optional[UpstreamRequestContext] = None,
+        route: Optional[ZqiRoute] = None,
     ) -> Dict[str, str]:
         """构造上游请求头。"""
         headers = {
@@ -233,9 +238,12 @@ class ClaudeClient:
             "anthropic-version": self.anthropic_version,
             Constants.HEADER_CLIENT_SOURCE: Constants.CLIENT_SOURCE_IDE,
         }
-        if self.api_key:
-            headers["x-api-key"] = self.api_key
-            headers["authorization"] = f"Bearer {self.api_key}"
+        api_key = route.api_key if route is not None else self.api_key
+        if api_key:
+            headers["x-api-key"] = api_key
+            headers["authorization"] = f"Bearer {api_key}"
+        if route:
+            headers.update(route.headers)
         if request_id:
             headers["x-request-id"] = request_id
         if request_context:
@@ -243,15 +251,19 @@ class ClaudeClient:
             headers[Constants.HEADER_CLIENT_TRACE_ID] = request_context.client_trace_id
         return headers
 
-    def parse_json_response(self, response: httpx.Response) -> Dict[str, Any]:
+    def parse_json_response(
+        self, response: httpx.Response, route_api_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """解析上游 JSON 响应。"""
-        self.raise_for_error_response(response)
+        self.raise_for_error_response(response, route_api_key)
         try:
             return response.json()
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=502, detail="Claude upstream returned invalid JSON") from exc
 
-    def raise_for_error_response(self, response: httpx.Response) -> None:
+    def raise_for_error_response(
+        self, response: httpx.Response, route_api_key: Optional[str] = None
+    ) -> None:
         """解析并抛出上游 HTTP 错误。"""
         if response.status_code < 400:
             return
@@ -259,7 +271,9 @@ class ClaudeClient:
         logger.warning(
             "claude_upstream_error status_code=%s detail=%s",
             response.status_code,
-            sanitize_error_detail_for_log(error_message, self.api_key),
+            sanitize_error_detail_for_log(
+                error_message, route_api_key or self.api_key
+            ),
         )
         friendly_message = self.classify_claude_error(error_message)
         raise HTTPException(status_code=response.status_code, detail=friendly_message)

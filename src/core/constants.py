@@ -55,3 +55,9 @@ class Constants:
     STREAM_ERROR_TIMEOUT_MESSAGE = "上游流式响应超时，请稍后重试。"
     STREAM_ERROR_CONNECTION_MESSAGE = "上游流式连接中断，请稍后重试。"
     STREAM_ERROR_CONVERSION_MESSAGE = "流式响应转换失败，请稍后重试。"
+
+    ZQI_CACHE_TTL_SECONDS = 1800
+    ZQI_REQUEST_TIMEOUT_SECONDS = 10
+    ZQI_RETRY_BACKOFF_SECONDS = 0.2
+    ZQI_MAX_RETRIES = 1
+    ZQI_FORWARD_URL = "https://llm.api.zyuncs.com/v1"

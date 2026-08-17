@@ -18,6 +18,7 @@ from src.core.client import ClaudeClient, OpenedClaudeStream
 from src.core.config import config
 from src.core.constants import Constants
 from src.core.request_context import resolve_request_context
+from src.core.zqi_catalog import ZqiCatalogClient, ZqiRouteResolver
 from src.models.openai import OpenAIChatCompletionRequest
 
 router = APIRouter()
@@ -30,6 +31,7 @@ claude_client = ClaudeClient(
     config.request_timeout,
     config.read_timeout,
 )
+zqi_route_resolver = ZqiRouteResolver(ZqiCatalogClient())
 
 
 async def validate_api_key(
@@ -68,6 +70,7 @@ async def create_chat_completion(
         len(request.tools or []),
     )
     claude_request = convert_openai_to_claude_request(request)
+    route = await zqi_route_resolver.resolve(request.model)
     logger.info(
         "chat_completion_upstream_request request_id=%s model=%s stream=%s max_tokens=%s",
         request_id,
@@ -82,7 +85,7 @@ async def create_chat_completion(
     if request.stream:
         claude_request["stream"] = True
         opened_stream = await claude_client.create_message_stream(
-            claude_request, request_id, request_context
+            claude_request, request_id, request_context, route
         )
         logger.info("chat_completion_stream_started request_id=%s", request_id)
         return StreamingResponse(
@@ -92,7 +95,7 @@ async def create_chat_completion(
         )
 
     claude_response = await claude_client.create_message(
-        claude_request, request_id, request_context
+        claude_request, request_id, request_context, route
     )
     logger.info("chat_completion_completed request_id=%s", request_id)
     return convert_claude_response_to_openai(claude_response, request)

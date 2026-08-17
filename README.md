@@ -2,6 +2,8 @@
 
 OpenAI Chat Completions 兼容入口，用来调用 Claude Messages 兼容服务。代理会把客户端的 `/v1/chat/completions` 请求转换为 Claude Messages 请求，再把 Claude 响应转换回 OpenAI Chat Completions 响应。
 
+当请求模型完整匹配 WisCode 智企套餐目录中的 `models[].name` 时，代理会读取 `$HOME/.wiscode/auth.json` 查询套餐并使用套餐 key。未出现在目录中的模型继续使用 `.env` 的普通 Claude 配置。套餐目录读取失败或目录字段不符合契约时会返回具体错误，不会静默降级。
+
 ## 功能
 
 - 支持 `POST /v1/chat/completions`
