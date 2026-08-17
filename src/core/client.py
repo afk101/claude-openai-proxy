@@ -238,7 +238,7 @@ class ClaudeClient:
             "anthropic-version": self.anthropic_version,
             Constants.HEADER_CLIENT_SOURCE: Constants.CLIENT_SOURCE_IDE,
         }
-        api_key = route.api_key if route is not None else self.api_key
+        api_key = route.api_key if route and route.api_key else self.api_key
         if api_key:
             headers["x-api-key"] = api_key
             headers["authorization"] = f"Bearer {api_key}"

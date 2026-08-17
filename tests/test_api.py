@@ -197,16 +197,17 @@ def test_chat_completion_forwards_zqi_route_headers_without_default_key(monkeypa
     assert "claude-default" not in headers.values()
 
 
-def test_empty_zqi_route_does_not_fall_back_to_default_key():
-    """目录明确返回普通 route 时不应错误携带默认上游密钥。"""
+def test_unknown_zqi_model_falls_back_to_default_key():
+    """目录未命中模型时应继续使用普通上游密钥。"""
     import src.api.endpoints as endpoints
 
     headers = endpoints.claude_client.build_headers(
-        route=ZqiRoute(model="pkg/model", api_key=None, headers={})
+        route=ZqiRoute(model="ordinary/model", api_key=None, headers={}),
+        request_id="request-id",
     )
 
-    assert "x-api-key" not in headers
-    assert "authorization" not in headers
+    assert headers["x-api-key"] == endpoints.claude_client.api_key
+    assert headers["authorization"] == f"Bearer {endpoints.claude_client.api_key}"
 
 
 @pytest.mark.parametrize("stream", [False, True])
