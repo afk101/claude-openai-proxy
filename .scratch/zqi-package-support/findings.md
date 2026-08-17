@@ -111,3 +111,11 @@
 - `/Users/qihoo/.codex-api/worktrees/8a13/kwoo-client/server/services/official-model-catalog.ts`
 - `/Users/qihoo/Documents/A_Finer/aiproxy/core/controller/relay-forward.go`
 - `/Users/qihoo/Documents/A_Finer/aiproxy/core/relay/adaptor/openai/adaptor.go`
+
+## Spec/Issue 覆盖自审
+
+- REQ-01 至 REQ-17 均已写入 `spec.md`。
+- SCN-01 至 SCN-12 均已写入 `spec.md`。
+- Issue 01 覆盖目录、认证、缓存、校验和路由选择；Issue 02 覆盖请求级 route 与普通/套餐 headers；Issue 03 覆盖全量验证、curl 和文档。
+- Blocking graph：`01 -> 02 -> 03`，无环；所有 requirements/scenarios 均有 issue 覆盖。
+- Review Base Commit: `bf796115a0d5286ecb7673ccf520a69c18a88949`
