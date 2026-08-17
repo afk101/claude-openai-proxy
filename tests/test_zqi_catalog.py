@@ -101,6 +101,78 @@ def test_caches_for_thirty_minutes_and_refreshes_on_auth_change(tmp_path):
     asyncio.run(run())
 
 
+def test_concurrent_refresh_uses_single_catalog_request(tmp_path):
+    async def run():
+        auth_path = auth_payload(tmp_path)
+        requests = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handler(request):
+            requests.append(request)
+            started.set()
+            await release.wait()
+            return httpx.Response(200, json=catalog_response([package()]))
+
+        catalog = ZqiCatalogClient(
+            auth_path=auth_path,
+            transport=httpx.MockTransport(handler),
+        )
+        first = asyncio.create_task(catalog.get_snapshot())
+        second = asyncio.create_task(catalog.get_snapshot())
+        await started.wait()
+        assert len(requests) == 1
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run())
+
+
+def test_catalog_retries_network_failure_once(tmp_path):
+    async def run():
+        auth_path = auth_payload(tmp_path)
+        attempts = []
+
+        async def handler(request):
+            attempts.append(request)
+            if len(attempts) == 1:
+                raise httpx.ConnectError("temporary failure", request=request)
+            return httpx.Response(200, json=catalog_response([]))
+
+        catalog = ZqiCatalogClient(
+            auth_path=auth_path,
+            transport=httpx.MockTransport(handler),
+        )
+        snapshot = await catalog.get_snapshot()
+
+        assert snapshot.packages == ()
+        assert len(attempts) == 2
+
+    asyncio.run(run())
+
+
+def test_catalog_401_does_not_retry(tmp_path):
+    async def run():
+        auth_path = auth_payload(tmp_path)
+        attempts = []
+
+        async def handler(request):
+            attempts.append(request)
+            return httpx.Response(401, json={"context": {"code": 401}})
+
+        catalog = ZqiCatalogClient(
+            auth_path=auth_path,
+            transport=httpx.MockTransport(handler),
+        )
+        with pytest.raises(HTTPException) as error:
+            await catalog.get_snapshot()
+
+        assert error.value.status_code == 401
+        assert len(attempts) == 1
+
+    asyncio.run(run())
+
+
 def test_resolves_package_route_and_preserves_model_name(tmp_path):
     async def run():
         auth_path = auth_payload(tmp_path)

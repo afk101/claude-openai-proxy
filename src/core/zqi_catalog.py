@@ -161,7 +161,8 @@ class ZqiCatalogClient:
         context = payload.get("context")
         if not isinstance(context, dict):
             raise HTTPException(status_code=502, detail="智企套餐目录响应 context 字段类型错误：期望 object")
-        if context.get("code") != 0:
+        context_code = context.get("code")
+        if isinstance(context_code, bool) or context_code != 0:
             raise HTTPException(status_code=502, detail=f"智企套餐目录 context.code 非成功值：{context.get('code')}")
         data = payload.get("data")
         if not isinstance(data, dict):
