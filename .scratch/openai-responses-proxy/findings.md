@@ -114,6 +114,15 @@
 - 实施必须采用 expand–contract：先并存新增 Responses client/endpoint 与旧链路，再接入路由和流式，最后删除旧 Chat/Claude 实现，保证每个 issue 提交后全套测试可运行。
 - 最小信封解析必须拒绝重复的顶层 `model` 或 `stream`，防止代理按一个值选套餐 key、上游按另一个值执行请求。模型原值不裁剪、不重写，`apiNames` 的 `responses` 判断区分大小写。
 - HTTPX 0.28.1 会在调用方未声明时自动添加 `Accept-Encoding: gzip, deflate`。由于代理选择保留压缩 raw body，首版必须在调用方缺失或空值时显式向上游发送 `identity`；调用方提供非空值时才按列表语义转发其能力。
+- 实现完成后已由根目录 `start.sh` 启动本分支服务，并通过本地 `http://127.0.0.1:7072/v1/responses` 重跑 11 模型；所有请求都先经过本地代理，路由类型来自代理脱敏日志。
+- 本地代理 11 模型结果为：6 项严格满足 2xx、completed、显式 `error=null` 与 `TEST OK`；`qwen/qwen3.8-flash` 和 `360-Wiscode-Multimodal` 返回 200/completed/正确文本但省略 `error` 字段；3 个 `WisGPT-5.6-*` 经普通密钥回退后透明返回上游 402。后五项不是指定 GLM 消息矩阵的失败，也没有被伪报成严格成功。
+- 指定 GLM 消息矩阵首次运行只有 4/10 消息通过；assistant/system/developer 与两个 phase 用例都因 `max_output_tokens=128` 在生成正文前耗尽 reasoning tokens，响应为 `status=incomplete`、`incomplete_details.reason=max_output_tokens`。
+- 首次 `input_file` 使用 `text/plain` data URL 时，上游返回 HTTP 400、错误码 1210 和“文件解析失败”；同一内容改为带有效 xref 的微小自包含 PDF 后，上游完成并正确读取 `FILE CONTENT OK`。因此修正的是验收输入格式，不是代理转换逻辑。
+- 验收器将短回答上限提高到 1024，并以内存生成的微小 PDF 替代 text/plain 文件；对应离线测试先出现 2 个预期红灯，修改后 13 项全部通过。
+- 修正后完整重跑 `z-ai/glm-5.3-flash`：字符串 input、四种 role、两种 assistant phase、`input_text`、`input_image`、`input_file` 共 10/10；function call 与 function_call_output 共 2/2；原生 stream 共 1/1。13 项均为 HTTP 200、`status=completed`、正确语义输出并命中智企套餐。
+- GLM 的非流式 12 项都显式返回 `error=null`。真实 `response.completed` SSE 内的 response 省略了 nullable `error` 字段，但具备 `status=completed` 与 `STREAM OK`，且没有 `[DONE]`；官方标准示例包含 `error:null`。由于本代理必须原样转发，验收记录该上游兼容性偏差，不在代理内补字段。
+- 最终自动验证为 `100 passed`；`tests/test_start_sh.sh`、`compileall`、`uv lock --check`、从 `/tmp` 执行 `start.sh --help` 和 `git diff --check` 均通过。唯一测试警告来自既有 FastAPI TestClient 的 StarletteDeprecationWarning。
+- `.env` 由 `.gitignore` 明确忽略；排除 `.env`、`.venv` 和 `.git` 后，对常见 `sk-` 长密钥与 JWT 形态的文件名扫描均无命中。真实验收器只读本地代理地址和可选 `PROXY_API_KEY`，不会读取上游密钥。
 
 ## Technical Decisions
 
@@ -154,6 +163,8 @@
 |-------|------------|
 | 第一次目录探测命令因包含临时目录删除操作而被本地安全策略拦截，网络请求未发出 | 改用标准输入向 `curl` 传递敏感请求头并通过管道直接解析，随后目录请求成功 |
 | 进度消息曾把“目录命中数量”和“最终成功数量”都写成 8 | 已核对并更正：目录命中 7 个，最终调用成功 8 个 |
+| 验收器静态检查尝试调用未安装且未声明为开发依赖的 `ruff` | 不重复失败命令，改用项目已有的 pytest、compileall、lock check 与 `git diff --check` 完成验证 |
+| 首次敏感模式扫描的复合 shell 引号未闭合，扫描没有运行 | 拆成两个无复合引号的只读 `rg --files-with-matches` 扫描，随后均无命中 |
 
 ## Resources
 

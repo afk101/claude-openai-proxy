@@ -12,15 +12,15 @@
 
 ## Acceptance Criteria
 
-- [ ] 完整 Python suite、编译检查、shell 测试和 CLI help 均通过。
-- [ ] 本地服务由 `start.sh` 启动并监听 7072，所有真实请求首先进入本地 `/v1/responses`。
-- [ ] 图片中的 11 个模型逐项完成脱敏记录，包括实际路由、HTTP、Responses status、error 和文本。
-- [ ] `z-ai/glm-5.3-flash` 的字符串 input 以及 user、assistant、system、developer 四种 message role 均返回 2xx、completed、error null 和可验证文本。
-- [ ] 同一模型的 assistant commentary/final_answer phase、input_text、微小自包含 input_image、微小自包含 input_file 均返回 2xx、completed、error null 和内容相关输出。
-- [ ] 同一模型完成一次由模型产生 function_call、代理回送匹配 function_call_output、模型返回最终文本的两阶段交互。
-- [ ] 同一模型完成原生 `stream=true` 请求，观察到 `response.completed`，且代理没有追加 `[DONE]` 或自定义事件。
-- [ ] 任一真实消息变体失败时，不将其降级为“上游不支持”后跳过；必须定位代理字节、Header、路由或上游契约差异，修正后重新执行完整消息矩阵。
-- [ ] 可重复验证工具不读取或输出上游密钥；运行结果和仓库敏感信息扫描均通过。
+- [x] 完整 Python suite、编译检查、shell 测试和 CLI help 均通过。
+- [x] 本地服务由 `start.sh` 启动并监听 7072，所有真实请求首先进入本地 `/v1/responses`。
+- [x] 图片中的 11 个模型逐项完成脱敏记录，包括实际路由、HTTP、Responses status、error 和文本。
+- [x] `z-ai/glm-5.3-flash` 的字符串 input 以及 user、assistant、system、developer 四种 message role 均返回 2xx、completed、error null 和可验证文本。
+- [x] 同一模型的 assistant commentary/final_answer phase、input_text、微小自包含 input_image、微小自包含 input_file 均返回 2xx、completed、error null 和内容相关输出。
+- [x] 同一模型完成一次由模型产生 function_call、代理回送匹配 function_call_output、模型返回最终文本的两阶段交互。
+- [x] 同一模型完成原生 `stream=true` 请求，观察到 `response.completed`，且代理没有追加 `[DONE]` 或自定义事件。
+- [x] 任一真实消息变体失败时，不将其降级为“上游不支持”后跳过；必须定位代理字节、Header、路由或上游契约差异，修正后重新执行完整消息矩阵。
+- [x] 可重复验证工具不读取或输出上游密钥；运行结果和仓库敏感信息扫描均通过。
 
 ## 验证方式
 

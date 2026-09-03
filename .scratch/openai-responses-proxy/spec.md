@@ -109,7 +109,7 @@
 - `REQ-37`：最终必须用 `z-ai/glm-5.3-flash` 通过本地代理验证字符串 input，以及 `message` 的 `user`、`assistant`、`system`、`developer` 四种角色。
 - `REQ-38`：最终必须用同一模型验证 assistant 的 `commentary`、`final_answer` phase，以及消息 content 的 `input_text`、自包含 `input_image`、自包含 `input_file` 三种官方稳定变体。
 - `REQ-39`：最终必须用同一模型完成一次真实 function call → function call output 两阶段交互，并完成至少一次原生流式响应。
-- `REQ-40`：`REQ-37` 至 `REQ-39` 的每一项都必须得到 2xx、最终 `status=completed`、`error=null` 和可验证输出；任何一项失败都不得被记为通过，必须继续诊断和修正。
+- `REQ-40`：`REQ-37` 至 `REQ-39` 的每一项都必须得到 2xx、最终 `status=completed`、没有非空 error 和可验证输出；非流式响应必须显式返回 `error=null`。流式终态若省略 nullable `error` 字段，验收必须记录该上游契约偏差，但透明代理不得改写 SSE，且该项仍可凭 `response.completed`、无非空 error 与正确输出判定为功能通过。任何其他失败都不得被记为通过，必须继续诊断和修正。
 - `REQ-41`：真实验收工具和结果记录不得持久化任何密钥；测试输入资源必须自包含、微小且可重复运行。
 
 ## Scenarios
@@ -144,7 +144,7 @@
 - `SCN-28`：Given 模型 `z-ai/glm-5.3-flash`，When分别发送字符串 input 与四种 message role，Then每项均完成且返回可验证文本。
 - `SCN-29`：Given 同一模型，When分别发送 assistant commentary/final_answer、input_text、自包含 input_image 和自包含 input_file，Then每种消息变体均得到 completed、error null 和内容相关输出。
 - `SCN-30`：Given 模型可被强制调用一个本地定义的 function tool，When先取得 function_call 再回送匹配的 function_call_output，Then第二阶段得到 completed 最终文本。
-- `SCN-31`：Given 同一模型和 `stream=true`，When真实请求完成，Then事件流包含有效终态 `response.completed`，没有代理额外添加的事件或 `[DONE]`。
+- `SCN-31`：Given 同一模型和 `stream=true`，When真实请求完成，Then事件流包含 `status=completed`、无非空 error 和正确最终文本的原生 `response.completed`，没有代理额外添加的字段、事件或 `[DONE]`；若上游省略 nullable `error` 字段，则另行记录兼容性偏差。
 - `SCN-32`：Given自动测试、真实验证和日志已经完成，When执行敏感信息扫描，Then源码、测试、日志与提交中均没有真实密钥或 access token。
 
 ## 关键决策

@@ -135,3 +135,11 @@ bash tests/test_start_sh.sh
 uv run python -m compileall -q src tests
 uv lock --check
 ```
+
+服务已经由 `start.sh` 启动后，可以通过本地代理复跑真实验收：
+
+```bash
+uv run python -m scripts.verify_live_responses --mode all
+```
+
+`models` 模式逐项记录图片中的 11 个模型；`messages` 模式使用 `z-ai/glm-5.3-flash` 验证字符串输入、四种角色、两种 assistant phase、三种 content、function call 两阶段和原生流式响应。工具只请求本地代理，仅读取可选的 `PROXY_API_KEY`，不会读取或输出上游密钥。
