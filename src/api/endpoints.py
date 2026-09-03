@@ -76,7 +76,7 @@ async def create_chat_completion(
         request_id,
         claude_request["model"],
         claude_request["stream"],
-        claude_request["max_tokens"],
+        claude_request.get("max_tokens"),
     )
 
     if await http_request.is_disconnected():

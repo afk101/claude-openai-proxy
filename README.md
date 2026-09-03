@@ -58,7 +58,7 @@ python -m pip install -r requirements.txt
 | `REQUEST_TIMEOUT` | `90` | 请求连接/写入超时秒数 |
 | `READ_TIMEOUT` | `480` | 流式读取超时秒数 |
 
-模型名称会原样透传给上游。调用方指定 `max_tokens` 或 `max_completion_tokens` 时，代理会使用该值；两者均未指定时，统一默认 `128000`。
+模型名称会原样透传给上游。调用方提供 `max_tokens` 时会原样转发；只提供 `max_completion_tokens` 时会将它转换为上游的 `max_tokens`。两个字段都没有提供时，代理不会生成默认上限，而是由内网 aiproxy 根据实际路由自行补充。
 
 ## 启动
 
@@ -110,7 +110,6 @@ curl -N http://127.0.0.1:7072/v1/chat/completions \
     "messages": [
       {"role": "user", "content": "请用一句话回答：1+1等于几？"}
     ],
-    "max_tokens": 64,
     "stream": true
   }'
 ```

@@ -4,7 +4,7 @@ import json
 import asyncio
 import logging
 
-from src.conversion.request_converter import convert_openai_to_claude_request, resolve_max_tokens
+from src.conversion.request_converter import convert_openai_to_claude_request
 from src.conversion.response_converter import (
     convert_claude_response_to_openai,
     convert_claude_streaming_to_openai,
@@ -12,24 +12,8 @@ from src.conversion.response_converter import (
 from src.models.openai import OpenAIChatCompletionRequest
 
 
-def test_resolve_max_tokens_uses_client_limit_for_arbitrary_model():
-    """任意模型应使用调用方指定的输出 token 上限。"""
-    request = OpenAIChatCompletionRequest(
-        model="claude-4.8-opus", messages=[], max_tokens=123456
-    )
-
-    assert resolve_max_tokens(request) == 123456
-
-
-def test_resolve_max_tokens_uses_generic_default_for_arbitrary_model():
-    """任意模型未传输出上限时，应使用统一默认值而非模型映射。"""
-    request = OpenAIChatCompletionRequest(model="custom-upstream-model", messages=[])
-
-    assert resolve_max_tokens(request) == 64000
-
-
 def test_convert_openai_request_preserves_arbitrary_model_for_upstream():
-    """转换到上游时应原样保留调用方模型标识。"""
+    """转换到上游时应保留模型标识和调用方明确指定的输出上限。"""
     request = OpenAIChatCompletionRequest(
         model="claude-4.8-opus",
         messages=[{"role": "user", "content": "你好"}],
@@ -40,26 +24,6 @@ def test_convert_openai_request_preserves_arbitrary_model_for_upstream():
 
     assert result["model"] == "claude-4.8-opus"
     assert result["max_tokens"] == 123456
-
-
-def test_resolve_max_tokens_keeps_client_token_overrides():
-    """客户端显式传入 token 上限时，应优先使用客户端设置。"""
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(
-                model="custom-upstream-model", messages=[], max_tokens=100
-            )
-        )
-        == 100
-    )
-    assert (
-        resolve_max_tokens(
-            OpenAIChatCompletionRequest(
-                model="custom-upstream-model", messages=[], max_completion_tokens=200
-            )
-        )
-        == 200
-    )
 
 
 def test_convert_openai_request_to_claude_request_with_tools_and_tool_results():

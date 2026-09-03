@@ -13,10 +13,16 @@ def convert_openai_to_claude_request(request: OpenAIChatCompletionRequest) -> Di
     system_messages, conversation_messages = split_system_messages(request.messages)
     claude_request: Dict[str, Any] = {
         "model": request.model,
-        "max_tokens": resolve_max_tokens(request),
         "messages": convert_openai_messages(conversation_messages),
         "stream": bool(request.stream),
     }
+
+    # 调用方明确指定输出上限时必须保留其意图；新版字段只需转换成上游使用的字段名。
+    # 两个字段都缺失时不生成默认值，由内网 aiproxy 根据实际路由自行补充输出上限。
+    if request.max_tokens is not None:
+        claude_request["max_tokens"] = request.max_tokens
+    elif request.max_completion_tokens is not None:
+        claude_request["max_tokens"] = request.max_completion_tokens
 
     system_text = merge_system_messages(system_messages)
     if system_text:
@@ -48,15 +54,6 @@ def split_system_messages(messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str
         else:
             conversation_messages.append(message)
     return system_messages, conversation_messages
-
-
-def resolve_max_tokens(request: OpenAIChatCompletionRequest) -> int:
-    """解析 Claude 所需的 max_tokens，优先使用调用方设置。"""
-    if request.max_tokens is not None:
-        return request.max_tokens
-    if request.max_completion_tokens is not None:
-        return request.max_completion_tokens
-    return Constants.DEFAULT_MAX_TOKENS
 
 
 def merge_system_messages(

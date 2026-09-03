@@ -93,8 +93,18 @@ def post_and_capture_upstream(monkeypatch, *, stream, headers=None, upstream_api
     return response, captured["headers"]
 
 
-def test_chat_completions_endpoint_accepts_arbitrary_model_with_default_token_budget(monkeypatch):
-    """接口应接受任意模型，并在未传上限时使用统一默认值。"""
+@pytest.mark.parametrize(
+    ("token_fields", "expected_max_tokens"),
+    [
+        ({}, None),
+        ({"max_tokens": 64}, 64),
+        ({"max_completion_tokens": 128}, 128),
+    ],
+)
+def test_chat_completions_endpoint_forwards_only_explicit_token_limit(
+    monkeypatch, token_fields, expected_max_tokens
+):
+    """接口应转发显式输出上限，并在调用方没有提供时省略 max_tokens。"""
     captured = {}
 
     async def fake_create_message(claude_request, request_id=None, request_context=None, route=None):
@@ -112,12 +122,19 @@ def test_chat_completions_endpoint_accepts_arbitrary_model_with_default_token_bu
 
     response = client.post(
         "/v1/chat/completions",
-        json={"model": "claude-4.8-opus", "messages": [{"role": "user", "content": "你好"}]},
+        json={
+            "model": "claude-4.8-opus",
+            "messages": [{"role": "user", "content": "你好"}],
+            **token_fields,
+        },
     )
 
     assert response.status_code == 200
     assert captured["request"]["model"] == "claude-4.8-opus"
-    assert captured["request"]["max_tokens"] == 64000
+    if expected_max_tokens is None:
+        assert "max_tokens" not in captured["request"]
+    else:
+        assert captured["request"]["max_tokens"] == expected_max_tokens
 
 
 def test_chat_completions_endpoint_converts_request_and_response(monkeypatch, caplog):
