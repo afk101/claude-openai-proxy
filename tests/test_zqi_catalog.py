@@ -28,6 +28,8 @@ def package(
     model_name="pkg/model",
     package_id=1022,
     identifier="zyzj_package",
+    api_names=None,
+    enabled=True,
     **overrides,
 ):
     item = {
@@ -37,7 +39,11 @@ def package(
         "exhausted": False,
         "apiKey": {"full": "package-key"},
         "models": [
-            {"name": model_name, "apiNames": ["messages"], "enabled": True}
+            {
+                "name": model_name,
+                "apiNames": ["messages"] if api_names is None else api_names,
+                "enabled": enabled,
+            }
         ],
     }
     item.update(overrides)
@@ -193,6 +199,253 @@ def test_resolves_package_route_and_preserves_model_name(tmp_path):
         assert route.headers["X-Pkg-Model"] == "1022"
         assert route.headers["X-Ai-Forward-Email"] == "user@example.test"
         assert route.model == "pkg/model"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("api_names", "requested_api_name", "expected_status"),
+    [
+        (["responses"], "responses", None),
+        (["messages", "responses"], "responses", None),
+        (["messages"], "responses", 400),
+        (["Responses"], "responses", 400),
+        (["responses"], "messages", 400),
+    ],
+)
+def test_resolver_selects_only_exact_requested_api_name(
+    tmp_path, api_names, requested_api_name, expected_status
+):
+    """路由只接受内部指定且大小写精确匹配的目录协议能力。"""
+
+    async def run():
+        auth_path = auth_payload(tmp_path)
+
+        async def handler(request):
+            return httpx.Response(
+                200,
+                json=catalog_response(
+                    [package("pkg/model", api_names=api_names)]
+                ),
+            )
+
+        catalog = ZqiCatalogClient(
+            auth_path=auth_path,
+            transport=httpx.MockTransport(handler),
+        )
+        resolver = ZqiRouteResolver(catalog)
+        if expected_status is None:
+            route = await resolver.resolve("pkg/model", requested_api_name)
+            assert route.api_key == "package-key"
+            return
+
+        with pytest.raises(HTTPException) as error:
+            await resolver.resolve("pkg/model", requested_api_name)
+        assert error.value.status_code == expected_status
+        assert requested_api_name in str(error.value.detail)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("requested_model", "expected_package_id"),
+    [
+        ("pkg/model", "1022"),
+        ("Pkg/model", None),
+        (" pkg/model", None),
+        ("pkg/model ", None),
+    ],
+)
+def test_responses_model_match_is_exact_and_only_missing_model_uses_default_route(
+    tmp_path, requested_model, expected_package_id
+):
+    """模型名不裁剪也不改写，只有精确未出现时才返回普通路由。"""
+
+    async def run():
+        auth_path = auth_payload(tmp_path)
+
+        async def handler(request):
+            return httpx.Response(
+                200,
+                json=catalog_response(
+                    [package("pkg/model", api_names=["responses"])]
+                ),
+            )
+
+        catalog = ZqiCatalogClient(
+            auth_path=auth_path,
+            transport=httpx.MockTransport(handler),
+        )
+        route = await ZqiRouteResolver(catalog).resolve(
+            requested_model,
+            "responses",
+        )
+
+        assert route.model == requested_model
+        if expected_package_id is None:
+            assert route.api_key is None
+            assert route.headers == {}
+        else:
+            assert route.headers["X-Pkg-Model"] == expected_package_id
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("packages", "expected_package_id"),
+    [
+        (
+            [
+                package("pkg/model", 1, "unknown_package", api_names=["responses"]),
+                package("pkg/model", 2, "sfdj_package", api_names=["responses"]),
+                package("pkg/model", 3, "zyzj_package", api_names=["responses"]),
+            ],
+            "3",
+        ),
+        (
+            [
+                package(
+                    "pkg/model",
+                    1,
+                    "zyzj_package",
+                    api_names=["responses"],
+                    exhausted=True,
+                ),
+                package("pkg/model", 2, "sfdj_package", api_names=["responses"]),
+                package("pkg/model", 3, "unknown_package", api_names=["responses"]),
+            ],
+            "2",
+        ),
+        (
+            [
+                package(
+                    "pkg/model",
+                    1,
+                    "zyzj_package",
+                    api_names=["responses"],
+                    expireAt="2000-01-01T00:00:00+00:00",
+                ),
+                package("pkg/model", 2, "zyzj_package", api_names=["responses"]),
+                package("pkg/model", 3, "sfdj_package", api_names=["responses"]),
+            ],
+            "2",
+        ),
+        (
+            [
+                package(
+                    "pkg/model",
+                    1,
+                    "zyzj_package",
+                    api_names=["responses"],
+                    enabled=False,
+                ),
+                package("pkg/model", 2, "sfdj_package", api_names=["responses"]),
+            ],
+            "2",
+        ),
+        (
+            [
+                package(
+                    "pkg/model",
+                    1,
+                    "zyzj_package",
+                    api_names=["responses"],
+                    exhausted=True,
+                ),
+                package(
+                    "pkg/model",
+                    2,
+                    "sfdj_package",
+                    api_names=["responses"],
+                    enabled=False,
+                ),
+                package("pkg/model", 3, "unknown_package", api_names=["responses"]),
+            ],
+            "3",
+        ),
+        (
+            [
+                package(
+                    "pkg/model",
+                    1,
+                    "zyzj_package",
+                    api_names=["responses"],
+                    expireAt="2999-01-01T00:00:00+00:00",
+                ),
+                package(
+                    "pkg/model",
+                    2,
+                    "zyzj_package",
+                    api_names=["responses"],
+                    expireAt="2050-01-01T00:00:00+00:00",
+                ),
+            ],
+            "1",
+        ),
+    ],
+)
+def test_responses_route_keeps_package_priority_and_availability_filters(
+    tmp_path, packages, expected_package_id
+):
+    """Responses 候选继续按套餐优先级和目录顺序跳过不可用项。"""
+
+    async def run():
+        auth_path = auth_payload(tmp_path)
+
+        async def handler(request):
+            return httpx.Response(200, json=catalog_response(packages))
+
+        catalog = ZqiCatalogClient(
+            auth_path=auth_path,
+            transport=httpx.MockTransport(handler),
+        )
+        route = await ZqiRouteResolver(catalog).resolve("pkg/model", "responses")
+
+        assert route.headers["X-Pkg-Model"] == expected_package_id
+
+    asyncio.run(run())
+
+
+def test_responses_model_with_only_unavailable_packages_returns_503(tmp_path):
+    """模型已声明 Responses 但所有套餐不可用时不得返回普通密钥路由。"""
+
+    async def run():
+        auth_path = auth_payload(tmp_path)
+        packages = [
+            package(
+                "pkg/model",
+                1,
+                api_names=["responses"],
+                expireAt="2000-01-01T00:00:00+00:00",
+            ),
+            package(
+                "pkg/model",
+                2,
+                api_names=["responses"],
+                exhausted=True,
+            ),
+            package(
+                "pkg/model",
+                3,
+                api_names=["responses"],
+                enabled=False,
+            ),
+        ]
+
+        async def handler(request):
+            return httpx.Response(200, json=catalog_response(packages))
+
+        catalog = ZqiCatalogClient(
+            auth_path=auth_path,
+            transport=httpx.MockTransport(handler),
+        )
+        with pytest.raises(HTTPException) as error:
+            await ZqiRouteResolver(catalog).resolve("pkg/model", "responses")
+
+        assert error.value.status_code == 503
+        assert "套餐已过期" in str(error.value.detail)
+        assert "套餐额度已耗尽" in str(error.value.detail)
+        assert "模型已禁用" in str(error.value.detail)
 
     asyncio.run(run())
 

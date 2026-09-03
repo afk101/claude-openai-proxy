@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from src.core.config import Config
 from src.core.zqi_catalog import ZqiCatalogClient, ZqiRouteResolver
 from src.main import app
 
@@ -125,12 +126,17 @@ def _write_fake_wiscode_auth(tmp_path: Path) -> Path:
 
 def _install_empty_catalog(monkeypatch, tmp_path: Path) -> None:
     """让公开入口经过真实 resolver，并由虚假目录确认模型完全未命中。"""
+    _install_catalog(monkeypatch, tmp_path, [])
+
+
+def _install_catalog(monkeypatch, tmp_path: Path, packages) -> None:
+    """让公开入口使用指定的合法目录，测试仍从 HTTP seam 观察最终路由。"""
     import src.api.endpoints as endpoints
 
     async def catalog_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"context": {"code": 0}, "data": {"list": []}},
+            json={"context": {"code": 0}, "data": {"list": packages}},
         )
 
     catalog = ZqiCatalogClient(
@@ -138,6 +144,22 @@ def _install_empty_catalog(monkeypatch, tmp_path: Path) -> None:
         transport=httpx.MockTransport(catalog_handler),
     )
     monkeypatch.setattr(endpoints, "zqi_route_resolver", ZqiRouteResolver(catalog))
+
+
+def _responses_package(model_name="pkg/model", **overrides):
+    """构造仅含 Responses 能力的最小合法套餐目录项。"""
+    package = {
+        "id": 2048,
+        "identifier": "zyzj_package",
+        "expireAt": "2999-01-01T00:00:00+00:00",
+        "exhausted": False,
+        "apiKey": {"full": "fake-package-key"},
+        "models": [
+            {"name": model_name, "apiNames": ["responses"], "enabled": True}
+        ],
+    }
+    package.update(overrides)
+    return package
 
 
 def _install_counted_empty_catalog(monkeypatch, tmp_path: Path):
@@ -206,6 +228,206 @@ def test_non_stream_responses_forwards_original_body_with_ordinary_key(
     assert captured["body"] == raw_body
     assert captured["headers"]["authorization"] == "Bearer fake-ordinary-key"
     assert captured["headers"]["x-api-key"] == "fake-ordinary-key"
+
+
+def test_responses_endpoint_uses_package_key_and_all_package_headers(
+    monkeypatch, tmp_path
+):
+    """Responses 目录命中时，公开入口应使用套餐身份和完整套餐 Header。"""
+    import src.api.endpoints as endpoints
+
+    captured = {}
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = request.headers
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream([b'{"status":"completed"}']),
+        )
+
+    _install_catalog(monkeypatch, tmp_path, [_responses_package()])
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"pkg/model","input":"hello"}',
+    )
+
+    headers = captured.get("headers")
+    assert response.status_code == 200
+    assert headers["authorization"] == "Bearer fake-package-key"
+    assert headers["x-api-key"] == "fake-package-key"
+    assert headers["x-ai-forward-url"] == "https://llm.api.zyuncs.com/v1"
+    assert headers["x-pkg-model"] == "2048"
+    assert headers["x-ai-forward-email"] == "tester@example.test"
+
+
+@pytest.mark.parametrize("api_names", [["messages"], ["Responses"], []])
+def test_responses_http_parameters_cannot_select_another_catalog_protocol(
+    monkeypatch, tmp_path, api_names
+):
+    """query 和未知 body 字段都不能把 Responses 入口切换为其他协议。"""
+    import src.api.endpoints as endpoints
+
+    model_requests = []
+    catalog_package = _responses_package()
+    catalog_package["models"][0]["apiNames"] = api_names
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        model_requests.append(request)
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream([b"unexpected"]),
+        )
+
+    _install_catalog(monkeypatch, tmp_path, [catalog_package])
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses?api_name=messages&protocol=messages",
+        content=(
+            b'{"model":"pkg/model","input":"hello",'
+            b'"api_name":"messages","protocol":"messages"}'
+        ),
+    )
+
+    assert response.status_code == 400
+    assert "responses" in response.json()["detail"]
+    assert model_requests == []
+
+
+def test_unavailable_responses_packages_return_503_without_ordinary_fallback(
+    monkeypatch, tmp_path
+):
+    """目录已出现模型但套餐不可用时，普通密钥不能绕过智企限制。"""
+    import src.api.endpoints as endpoints
+
+    model_requests = []
+    unavailable_package = _responses_package(
+        expireAt="2000-01-01T00:00:00+00:00"
+    )
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        model_requests.append(request)
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream([b"unexpected"]),
+        )
+
+    _install_catalog(monkeypatch, tmp_path, [unavailable_package])
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"pkg/model","input":"hello"}',
+    )
+
+    assert response.status_code == 503
+    assert "套餐已过期" in response.json()["detail"]
+    assert model_requests == []
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_status"),
+    [
+        ("missing_auth", 500),
+        ("invalid_token", 401),
+        ("catalog_http", 502),
+        ("catalog_json", 502),
+        ("catalog_schema", 502),
+    ],
+)
+def test_catalog_and_auth_failures_never_use_ordinary_key(
+    monkeypatch, tmp_path, failure_kind, expected_status
+):
+    """无法可靠判断目录命中时必须 fail closed，不能静默走普通密钥。"""
+    import src.api.endpoints as endpoints
+
+    model_requests = []
+    auth_path = tmp_path / "auth.json"
+    if failure_kind == "invalid_token":
+        auth_path.write_text(
+            json.dumps(
+                {
+                    "host": "catalog.example.test",
+                    "access_token": "",
+                }
+            ),
+            encoding="utf-8",
+        )
+    elif failure_kind != "missing_auth":
+        auth_path = _write_fake_wiscode_auth(tmp_path)
+
+    async def catalog_handler(request: httpx.Request) -> httpx.Response:
+        if failure_kind == "catalog_http":
+            return httpx.Response(503, content=b"catalog unavailable")
+        if failure_kind == "catalog_json":
+            return httpx.Response(200, content=b"not-json")
+        if failure_kind == "catalog_schema":
+            return httpx.Response(
+                200,
+                json={"context": {"code": 0}, "data": {"list": {}}},
+            )
+        return httpx.Response(
+            200,
+            json={"context": {"code": 0}, "data": {"list": []}},
+        )
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        model_requests.append(request)
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream([b"unexpected"]),
+        )
+
+    catalog = ZqiCatalogClient(
+        auth_path=auth_path,
+        transport=httpx.MockTransport(catalog_handler),
+    )
+    monkeypatch.setattr(endpoints, "zqi_route_resolver", ZqiRouteResolver(catalog))
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+    )
+
+    assert response.status_code == expected_status
+    assert model_requests == []
+
+
+def test_ordinary_key_configuration_prefers_claude_key(monkeypatch):
+    """普通回退密钥保持 CLAUDE_API_KEY 优先、ANTHROPIC_API_KEY 兼容。"""
+    monkeypatch.setenv("CLAUDE_API_KEY", "fake-claude-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key")
+    assert Config().claude_api_key == "fake-claude-key"
+
+    monkeypatch.delenv("CLAUDE_API_KEY")
+    assert Config().claude_api_key == "fake-anthropic-key"
 
 
 def test_invalid_routing_envelope_returns_400_before_external_requests(

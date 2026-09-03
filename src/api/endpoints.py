@@ -84,7 +84,12 @@ async def create_response(
         envelope.model,
         envelope.stream,
     )
-    route = await zqi_route_resolver.resolve(envelope.model)
+    # 协议能力由入口自身固定，不能从 query 或 body 的未知字段读取，避免调用方
+    # 把 Responses 请求伪装成 Messages 套餐请求后绕过目录能力约束。
+    route = await zqi_route_resolver.resolve(
+        envelope.model,
+        Constants.ZQI_API_NAME_RESPONSES,
+    )
     route_type = (
         Constants.RESPONSES_ROUTE_TYPE_PACKAGE
         if route and route.api_key
@@ -145,7 +150,11 @@ async def create_chat_completion(
         len(request.tools or []),
     )
     claude_request = convert_openai_to_claude_request(request)
-    route = await zqi_route_resolver.resolve(request.model)
+    # expand 阶段旧入口仍显式声明 Messages；最终 contract issue 会整体删除它。
+    route = await zqi_route_resolver.resolve(
+        request.model,
+        Constants.ZQI_API_NAME_MESSAGES,
+    )
     logger.info(
         "chat_completion_upstream_request request_id=%s model=%s stream=%s max_tokens=%s",
         request_id,

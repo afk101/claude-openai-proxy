@@ -1,5 +1,6 @@
 """OpenAI 兼容接口测试。"""
 
+import json
 import logging
 import re
 
@@ -9,7 +10,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.main import app
-from src.core.zqi_catalog import ZqiRoute
+from src.core.zqi_catalog import ZqiCatalogClient, ZqiRoute, ZqiRouteResolver
 
 
 @pytest.fixture(autouse=True)
@@ -18,7 +19,7 @@ def stub_zqi_route_resolver(monkeypatch):
     import src.api.endpoints as endpoints
 
     class DefaultRouteResolver:
-        async def resolve(self, model):
+        async def resolve(self, model, api_name):
             return None
 
     monkeypatch.setattr(endpoints, "zqi_route_resolver", DefaultRouteResolver())
@@ -212,6 +213,81 @@ def test_chat_completion_forwards_zqi_route_headers_without_default_key(monkeypa
     assert headers["authorization"] == "Bearer package-key"
     assert headers["X-Ai-Forward-Url"] == "https://llm.api.zyuncs.com/v1"
     assert "claude-default" not in headers.values()
+
+
+def test_chat_endpoint_keeps_messages_package_routing_during_expand(
+    monkeypatch, tmp_path
+):
+    """contract 删除前，旧 Chat 入口仍应通过 Messages 套餐完成请求。"""
+    import src.api.endpoints as endpoints
+
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "host": "catalog.example.test",
+                "access_token": "fake-catalog-token",
+                "mail": "tester@example.test",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def catalog_handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "context": {"code": 0},
+                "data": {
+                    "list": [
+                        {
+                            "id": 4096,
+                            "identifier": "zyzj_package",
+                            "expireAt": "2999-01-01T00:00:00+00:00",
+                            "exhausted": False,
+                            "apiKey": {"full": "fake-messages-package-key"},
+                            "models": [
+                                {
+                                    "name": "pkg/chat-model",
+                                    "apiNames": ["messages"],
+                                    "enabled": True,
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        )
+
+    captured = {}
+
+    async def upstream_handler(request):
+        captured["headers"] = request.headers
+        return build_successful_upstream_response(stream=False)
+
+    catalog = ZqiCatalogClient(
+        auth_path=auth_path,
+        transport=httpx.MockTransport(catalog_handler),
+    )
+    monkeypatch.setattr(endpoints, "zqi_route_resolver", ZqiRouteResolver(catalog))
+    monkeypatch.setattr(
+        endpoints.claude_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/chat/completions",
+        json={
+            "model": "pkg/chat-model",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["headers"]["authorization"] == "Bearer fake-messages-package-key"
+    assert captured["headers"]["x-api-key"] == "fake-messages-package-key"
+    assert captured["headers"]["x-pkg-model"] == "4096"
 
 
 def test_unknown_zqi_model_falls_back_to_default_key():

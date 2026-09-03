@@ -100,3 +100,5 @@ class Constants:
     ZQI_FORWARD_URL = "https://llm.api.zyuncs.com/v1"
     ZQI_INTERNAL_IDENTIFIER = "zyzj_package"
     ZQI_EXTERNAL_IDENTIFIER = "sfdj_package"
+    ZQI_API_NAME_MESSAGES = "messages"
+    ZQI_API_NAME_RESPONSES = "responses"
