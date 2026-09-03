@@ -188,6 +188,7 @@ def test_message_matrix_contains_every_approved_role_phase_and_content_type():
     assert payloads["role_assistant"]["input"][0]["role"] == "assistant"
     assert payloads["role_system"]["input"][0]["role"] == "system"
     assert payloads["role_developer"]["input"][0]["role"] == "developer"
+    assert payloads["role_developer"]["input"][1]["content"] == "计算 314 + 271。"
     assert payloads["phase_commentary"]["input"][0]["phase"] == "commentary"
     assert payloads["phase_final_answer"]["input"][0]["phase"] == "final_answer"
 
@@ -201,7 +202,8 @@ def test_message_matrix_contains_every_approved_role_phase_and_content_type():
     encoded_pdf = file_content[1]["file_data"].partition(",")[2]
     decoded_pdf = base64.b64decode(encoded_pdf)
     assert decoded_pdf.startswith(b"%PDF-1.4\n")
-    assert b"FILE CONTENT OK" in decoded_pdf
+    assert b"Harmless test document" in decoded_pdf
+    assert b"Verification code: FILE CONTENT OK" in decoded_pdf
     assert b"startxref" in decoded_pdf
 
 

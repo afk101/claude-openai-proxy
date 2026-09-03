@@ -18,6 +18,7 @@ from scripts.live_verification_constants import (
     DEFAULT_PROXY_BASE_URL,
     DEFAULT_TIMEOUT_SECONDS,
     FILE_CONTENT_MARKER,
+    FILE_DOCUMENT_TEXT,
     FILE_NAME,
     FUNCTION_ARGUMENT_NAME,
     FUNCTION_ARGUMENT_VALUE,
@@ -354,16 +355,20 @@ def build_message_cases(model: str) -> Tuple[MessageCase, ...]:
         ),
         MessageCase(
             "role_developer",
-            "DEVELOPER ROLE OK",
+            "585",
             _build_request_payload(
                 model,
                 [
                     {
                         "type": "message",
                         "role": "developer",
-                        "content": "必须只回复 DEVELOPER ROLE OK",
+                        "content": "回答算术问题时只输出阿拉伯数字结果，不添加说明。",
                     },
-                    {"type": "message", "role": "user", "content": "按要求回答"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "计算 314 + 271。",
+                    },
                 ],
             ),
         ),
@@ -459,13 +464,16 @@ def build_message_cases(model: str) -> Tuple[MessageCase, ...]:
                         "content": [
                             {
                                 "type": "input_text",
-                                "text": "读取所附 PDF，只回复文件中的大写标记",
+                                "text": (
+                                    "这是无害的本地集成测试 PDF。读取其中 "
+                                    "'Verification code:' 后的值，只回复该值。"
+                                ),
                             },
                             {
                                 "type": "input_file",
                                 "filename": FILE_NAME,
                                 "file_data": build_pdf_file_data_url(
-                                    FILE_CONTENT_MARKER
+                                    FILE_DOCUMENT_TEXT
                                 ),
                             },
                         ],

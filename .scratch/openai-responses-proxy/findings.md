@@ -129,6 +129,10 @@
 - 非标准数值已按 TDD 在公开端点复现红灯，并通过 `parse_constant` 拒绝；三种输入现在都在目录和模型上游之前返回 400。
 - Standards 审查中的重复上游连接生命周期已提取为统一打开、错误映射和清理流程；两个 ASGI 测试驱动已共享 scope 与响应聚合；function 参数名和值已拆成准确常量；新增 Shell 测试函数已补充中文职责说明。
 - 验收器需要复用运行契约常量，但直接导入旧 `src` 包会触发 `.env`。因此将 `load_dotenv()` 从包导入副作用移动到 `src.core.config`，再让验收器安全复用端口、Responses 路径、代理密钥变量名和 Header 常量；独立子进程测试证明导入验收器不会调用 dotenv。
+- 审查修正提交后已用当前 HEAD 重新启动服务。第一次完整 GLM 重跑中，PDF 为 200/completed 但模型给出泛化拒答；把孤立标记改成明确的无害验证文档后，文件单项恢复通过。第二次整组中，`developer` 的“必须回复 DEVELOPER ROLE OK”被模型误判为开发者模式诱导；改成 developer 角色约束无害算术输出、user 计算 `314+271` 后，单项稳定返回 `585`。
+- 上述两个真实失败都没有原样重试或降级跳过。最终重新执行完整矩阵得到消息 10/10、function 两阶段 2/2、原生 stream 1/1；每项均为 HTTP 200、`status=completed`、正确语义输出和 `route_type=package`。
+- 当前 HEAD 的最终 11 模型重跑得到 11/11 HTTP 200、`status=completed` 且包含 `TEST OK`。其中 9 项显式 `error=null`；`qwen/qwen3.8-flash` 和 `360-Wiscode-Multimodal` 仍省略 nullable `error`，因此严格字段门禁为 9/11，但两项业务响应成功且保持上游原样。此前 3 个 WisGPT 的 402 额度状态已经解除，最终重跑均走普通密钥并完成。
+- 当前 HEAD 再次验证普通流式回退：`360-Wiscode-Multimodal` 为 HTTP 200、completed、`FALLBACK STREAM OK`、`route_type=ordinary` 且没有 `[DONE]`。
 
 ## Technical Decisions
 

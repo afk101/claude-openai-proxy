@@ -32,6 +32,9 @@ FUNCTION_FINAL_MARKER = "FUNCTION OK"
 STREAM_FINAL_MARKER = "STREAM OK"
 FILE_CONTENT_MARKER = "FILE CONTENT OK"
 FILE_NAME = "verification.pdf"
+FILE_DOCUMENT_TEXT = (
+    f"Harmless test document. Verification code: {FILE_CONTENT_MARKER}"
+)
 ROUTE_LOG_PATTERN = (
     r"\bresponses_(?:completed|stream_started)\b.*\bmodel=(?P<model>\S+)\s+"
     r"route_type=(?P<route>package|ordinary)\b"
