@@ -93,8 +93,51 @@ class _GatedAsyncByteStream(httpx.AsyncByteStream):
         self.close_count += 1
 
 
-async def _call_app_directly(raw_body: bytes, headers=None):
-    """直接驱动公开 ASGI 接口，以观察未被测试客户端改写的响应字节和 Header。"""
+def _build_asgi_scope(raw_headers, spec_version=None):
+    """构造直接驱动 Responses 入口所需的最小 ASGI HTTP scope。"""
+    asgi = {"version": "3.0"}
+    if spec_version is not None:
+        asgi["spec_version"] = spec_version
+    return {
+        "type": "http",
+        "asgi": asgi,
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "headers": raw_headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("local.test", 80),
+        "root_path": "",
+        "state": {},
+    }
+
+
+def _collect_asgi_response(sent_messages):
+    """从 ASGI send 消息中还原状态、原始 Header 与拼接后的响应体。"""
+    start = next(
+        message
+        for message in sent_messages
+        if message["type"] == "http.response.start"
+    )
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent_messages
+        if message["type"] == "http.response.body"
+    )
+    return start["status"], start["headers"], body
+
+
+async def _drive_app_directly(
+    raw_body: bytes,
+    headers=None,
+    *,
+    keep_receive_open: bool,
+    spec_version=None,
+):
+    """统一驱动 ASGI 应用，并按用例选择请求完成后的 receive 行为。"""
     received_request = False
     sent_messages = []
     raw_headers = [(b"host", b"local.test"), (b"content-type", b"application/json")]
@@ -105,76 +148,35 @@ async def _call_app_directly(raw_body: bytes, headers=None):
         if not received_request:
             received_request = True
             return {"type": "http.request", "body": raw_body, "more_body": False}
+        if keep_receive_open:
+            await asyncio.Event().wait()
         return {"type": "http.disconnect"}
 
     async def send(message):
         sent_messages.append(message)
 
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": "/v1/responses",
-        "raw_path": b"/v1/responses",
-        "query_string": b"",
-        "headers": raw_headers,
-        "client": ("127.0.0.1", 12345),
-        "server": ("local.test", 80),
-        "root_path": "",
-        "state": {},
-    }
+    scope = _build_asgi_scope(raw_headers, spec_version)
     await app(scope, receive, send)
-    start = next(message for message in sent_messages if message["type"] == "http.response.start")
-    body = b"".join(
-        message.get("body", b"")
-        for message in sent_messages
-        if message["type"] == "http.response.body"
+    return _collect_asgi_response(sent_messages)
+
+
+async def _call_app_directly(raw_body: bytes, headers=None):
+    """直接驱动普通响应，并在请求体发完后模拟客户端断开 receive 通道。"""
+    return await _drive_app_directly(
+        raw_body,
+        headers,
+        keep_receive_open=False,
     )
-    return start["status"], start["headers"], body
 
 
 async def _call_stream_app_directly(raw_body: bytes, headers=None):
     """以 ASGI 2.4 驱动有限流，避免客户端库自动解压或折叠重复 Header。"""
-    received_request = False
-    sent_messages = []
-    raw_headers = [(b"host", b"local.test"), (b"content-type", b"application/json")]
-    raw_headers.extend(headers or [])
-
-    async def receive():
-        nonlocal received_request
-        if not received_request:
-            received_request = True
-            return {"type": "http.request", "body": raw_body, "more_body": False}
-        await asyncio.Event().wait()
-
-    async def send(message):
-        sent_messages.append(message)
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.4"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": "/v1/responses",
-        "raw_path": b"/v1/responses",
-        "query_string": b"",
-        "headers": raw_headers,
-        "client": ("127.0.0.1", 12345),
-        "server": ("local.test", 80),
-        "root_path": "",
-        "state": {},
-    }
-    await app(scope, receive, send)
-    start = next(message for message in sent_messages if message["type"] == "http.response.start")
-    body = b"".join(
-        message.get("body", b"")
-        for message in sent_messages
-        if message["type"] == "http.response.body"
+    return await _drive_app_directly(
+        raw_body,
+        headers,
+        keep_receive_open=True,
+        spec_version="2.4",
     )
-    return start["status"], start["headers"], body
 
 
 def _write_fake_wiscode_auth(tmp_path: Path) -> Path:
@@ -533,6 +535,9 @@ def test_invalid_routing_envelope_returns_400_before_external_requests(
         b'{"model":42,"input":"hello"}',
         b'{"model":"   ","input":"hello"}',
         b'{"model":"ordinary/model","stream":"false"}',
+        b'{"model":"ordinary/model","input":NaN}',
+        b'{"model":"ordinary/model","input":Infinity}',
+        b'{"model":"ordinary/model","input":-Infinity}',
         b'{"model":"first","model":"second"}',
         b'{"model":"ordinary/model","stream":false,"stream":true}',
     ]

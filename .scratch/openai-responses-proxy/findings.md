@@ -121,8 +121,14 @@
 - 验收器将短回答上限提高到 1024，并以内存生成的微小 PDF 替代 text/plain 文件；对应离线测试先出现 2 个预期红灯，修改后 13 项全部通过。
 - 修正后完整重跑 `z-ai/glm-5.3-flash`：字符串 input、四种 role、两种 assistant phase、`input_text`、`input_image`、`input_file` 共 10/10；function call 与 function_call_output 共 2/2；原生 stream 共 1/1。13 项均为 HTTP 200、`status=completed`、正确语义输出并命中智企套餐。
 - GLM 的非流式 12 项都显式返回 `error=null`。真实 `response.completed` SSE 内的 response 省略了 nullable `error` 字段，但具备 `status=completed` 与 `STREAM OK`，且没有 `[DONE]`；官方标准示例包含 `error:null`。由于本代理必须原样转发，验收记录该上游兼容性偏差，不在代理内补字段。
-- 最终自动验证为 `100 passed`；`tests/test_start_sh.sh`、`compileall`、`uv lock --check`、从 `/tmp` 执行 `start.sh --help` 和 `git diff --check` 均通过。唯一测试警告来自既有 FastAPI TestClient 的 StarletteDeprecationWarning。
+- 首轮最终自动验证为 `100 passed`；审查修正后增加到 `101 passed`。`tests/test_start_sh.sh`、`compileall`、`uv lock --check`、从 `/tmp` 执行 `start.sh --help` 和 `git diff --check` 均通过。唯一测试警告来自既有 FastAPI TestClient 的 StarletteDeprecationWarning。
 - `.env` 由 `.gitignore` 明确忽略；排除 `.env`、`.venv` 和 `.git` 后，对常见 `sk-` 长密钥与 JWT 形态的文件名扫描均无命中。真实验收器只读本地代理地址和可选 `PROXY_API_KEY`，不会读取上游密钥。
+- 已补跑未命中目录的 `360-Wiscode-Multimodal` 原生流：本地代理日志确认 `route_type=ordinary`，结果为 HTTP 200、`status=completed`、`FALLBACK STREAM OK`，且没有 `[DONE]`。至此套餐和 `.env` 普通密钥两条真实流式路径都已覆盖。
+- 本地真实代理日志另行扫描了长 `sk-`、JWT、Authorization、`x-api-key` 与 access_token 形态，均无命中；只保留请求 ID、模型、路由、状态和字节数等脱敏元数据。
+- 以 Review Base `9d727a841a6dde17fc81ac2363aae5a42fee6367` 进行的首次双轴审查得到 Standards 5 项、Spec 1 项。Spec 项指出 Python 默认 `json.loads` 会接受标准 JSON 禁止的 `NaN`、`Infinity` 和 `-Infinity`，使非法请求越过本地 400 门禁。
+- 非标准数值已按 TDD 在公开端点复现红灯，并通过 `parse_constant` 拒绝；三种输入现在都在目录和模型上游之前返回 400。
+- Standards 审查中的重复上游连接生命周期已提取为统一打开、错误映射和清理流程；两个 ASGI 测试驱动已共享 scope 与响应聚合；function 参数名和值已拆成准确常量；新增 Shell 测试函数已补充中文职责说明。
+- 验收器需要复用运行契约常量，但直接导入旧 `src` 包会触发 `.env`。因此将 `load_dotenv()` 从包导入副作用移动到 `src.core.config`，再让验收器安全复用端口、Responses 路径、代理密钥变量名和 Header 常量；独立子进程测试证明导入验收器不会调用 dotenv。
 
 ## Technical Decisions
 

@@ -12,14 +12,14 @@
 
 ## Acceptance Criteria
 
-- [ ] SSE 的拼接 raw bytes 与上游一致，空行、注释、多行 data、未知事件和终止事件均保留。
-- [ ] 代理不追加 `[DONE]`，不生成 response.completed、response.failed 或自定义错误事件。
-- [ ] 流式 status、Content-Type、Content-Encoding、重复端到端 Header 和逐跳过滤遵循非流式相同契约。
-- [ ] 上游流前 4xx/5xx 以原 status/header/body 开始下游响应。
-- [ ] 下游开始后的上游异常只终止 body、留下脱敏日志并清理资源。
-- [ ] 直接取消 ASGI task 时，取消向连接、响应头等待或 raw body 读取传播，无需释放测试 gate。
-- [ ] `http.disconnect` 或下游 send 失败时，上游流停止，response/client/活动记录最多关闭一次。
-- [ ] 套餐与普通密钥流式路径使用相同上下文解析和安全 Header 规则。
+- [x] SSE 的拼接 raw bytes 与上游一致，空行、注释、多行 data、未知事件和终止事件均保留。
+- [x] 代理不追加 `[DONE]`，不生成 response.completed、response.failed 或自定义错误事件。
+- [x] 流式 status、Content-Type、Content-Encoding、重复端到端 Header 和逐跳过滤遵循非流式相同契约。
+- [x] 上游流前 4xx/5xx 以原 status/header/body 开始下游响应。
+- [x] 下游开始后的上游异常只终止 body、留下脱敏日志并清理资源。
+- [x] 直接取消 ASGI task 时，取消向连接、响应头等待或 raw body 读取传播，无需释放测试 gate。
+- [x] `http.disconnect` 或下游 send 失败时，上游流停止，response/client/活动记录最多关闭一次。
+- [x] 套餐与普通密钥流式路径使用相同上下文解析和安全 Header 规则。
 
 ## 验证方式
 

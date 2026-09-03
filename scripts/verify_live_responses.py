@@ -19,21 +19,21 @@ from scripts.live_verification_constants import (
     DEFAULT_TIMEOUT_SECONDS,
     FILE_CONTENT_MARKER,
     FILE_NAME,
-    FUNCTION_ARGUMENT_KEY,
+    FUNCTION_ARGUMENT_NAME,
+    FUNCTION_ARGUMENT_VALUE,
     FUNCTION_FINAL_MARKER,
     FUNCTION_OUTPUT,
     FUNCTION_TOOL_NAME,
     MESSAGE_MATRIX_MODEL,
     MODEL_MATRIX,
-    PROXY_API_KEY_ENV,
     PROXY_BASE_URL_ENV,
     RED_PNG_DATA_URL,
-    RESPONSES_CREATE_PATH,
     RESULT_TEXT_LIMIT,
     ROUTE_LOG_PATTERN,
     SENSITIVE_OUTPUT_PATTERNS,
     STREAM_FINAL_MARKER,
 )
+from src.core.constants import Constants
 
 
 @dataclass(frozen=True)
@@ -486,8 +486,8 @@ def _build_function_tools() -> List[Dict[str, Any]]:
             "description": "Return the fixed verification value for one key.",
             "parameters": {
                 "type": "object",
-                "properties": {"key": {"type": "string"}},
-                "required": ["key"],
+                "properties": {FUNCTION_ARGUMENT_NAME: {"type": "string"}},
+                "required": [FUNCTION_ARGUMENT_NAME],
                 "additionalProperties": False,
             },
         }
@@ -503,7 +503,8 @@ def build_function_request(model: str) -> Dict[str, Any]:
                 "type": "message",
                 "role": "user",
                 "content": (
-                    f"调用 {FUNCTION_TOOL_NAME}，参数 key 必须是 {FUNCTION_ARGUMENT_KEY}。"
+                    f"调用 {FUNCTION_TOOL_NAME}，参数 {FUNCTION_ARGUMENT_NAME} "
+                    f"必须是 {FUNCTION_ARGUMENT_VALUE}。"
                     f"得到工具结果后只回复 {FUNCTION_FINAL_MARKER}。"
                 ),
             }
@@ -742,7 +743,10 @@ def _assess_function_call_stage(http_status: int, payload: Any) -> ResponseAsses
     function_call = find_function_call(payload, FUNCTION_TOOL_NAME)
     if function_call is None:
         return ResponseAssessment(False, normalized_status, "missing_function_call", "")
-    if function_call.arguments.get("key") != FUNCTION_ARGUMENT_KEY:
+    if (
+        function_call.arguments.get(FUNCTION_ARGUMENT_NAME)
+        != FUNCTION_ARGUMENT_VALUE
+    ):
         return ResponseAssessment(False, normalized_status, "unexpected_function_arguments", "")
     return ResponseAssessment(True, normalized_status, None, "function_call verified")
 
@@ -852,10 +856,10 @@ def _build_proxy_url(base_url: str) -> str:
     ):
         raise ValueError("invalid local proxy base URL")
     path = parsed.path.rstrip("/")
-    if path.endswith(RESPONSES_CREATE_PATH) or path.endswith("/v1"):
+    if path.endswith(Constants.RESPONSES_CREATE_PATH) or path.endswith("/v1"):
         raise ValueError("local proxy base URL must end before /v1")
     normalized = urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
-    return f"{normalized}{RESPONSES_CREATE_PATH}"
+    return f"{normalized}{Constants.RESPONSES_CREATE_PATH}"
 
 
 def _attach_routes(results: Sequence[LiveResult], routes: Mapping[str, str]) -> List[LiveResult]:
@@ -912,10 +916,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     headers = {
-        "Content-Type": "application/json",
-        "Accept-Encoding": "identity",
+        Constants.HEADER_CONTENT_TYPE: Constants.RESPONSES_CONTENT_TYPE,
+        Constants.HEADER_ACCEPT_ENCODING: Constants.RESPONSES_DEFAULT_ACCEPT_ENCODING,
     }
-    proxy_api_key = os.environ.get(PROXY_API_KEY_ENV)
+    proxy_api_key = os.environ.get(Constants.ENV_PROXY_API_KEY)
     if proxy_api_key:
         headers["Authorization"] = f"Bearer {proxy_api_key}"
 

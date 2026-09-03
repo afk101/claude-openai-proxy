@@ -1,5 +1,7 @@
 """真实 Responses 验收工具使用的固定模型、地址和微小自包含资源。"""
 
+from src.core.constants import Constants
+
 MODEL_MATRIX = (
     "WisGPT-5.6-Terra",
     "WisGPT-5.6-Luna",
@@ -16,16 +18,15 @@ MODEL_MATRIX = (
 MESSAGE_MATRIX_MODEL = "z-ai/glm-5.3-flash"
 
 PROXY_BASE_URL_ENV = "RESPONSES_PROXY_BASE_URL"
-PROXY_API_KEY_ENV = "PROXY_API_KEY"
-DEFAULT_PROXY_BASE_URL = "http://127.0.0.1:7072"
-RESPONSES_CREATE_PATH = "/v1/responses"
+DEFAULT_PROXY_BASE_URL = f"http://127.0.0.1:{Constants.DEFAULT_PORT}"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 # GLM 会先消耗 reasoning tokens；1024 可避免短回答在正文产生前被 128 token 截断。
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 RESULT_TEXT_LIMIT = 240
 
 FUNCTION_TOOL_NAME = "get_test_value"
-FUNCTION_ARGUMENT_KEY = "test"
+FUNCTION_ARGUMENT_NAME = "key"
+FUNCTION_ARGUMENT_VALUE = "test"
 FUNCTION_OUTPUT = "TEST OK"
 FUNCTION_FINAL_MARKER = "FUNCTION OK"
 STREAM_FINAL_MARKER = "STREAM OK"

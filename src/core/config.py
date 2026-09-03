@@ -2,7 +2,13 @@
 
 import os
 
+from dotenv import load_dotenv
+
 from src.core.constants import Constants
+
+# 加载项目根目录 .env 文件中的环境变量（如果存在）。
+# 注意：已有的环境变量不会被覆盖；加载职责与配置构造放在同一模块。
+load_dotenv()
 
 
 class Config:

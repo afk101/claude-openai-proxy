@@ -12,16 +12,16 @@
 
 ## Acceptance Criteria
 
-- [ ] 合法非流式请求通过公开 Responses 入口到达 `/v1/responses` 上游，捕获的 body bytes 与调用方发送值完全相同。
-- [ ] 代理只旁路读取 model/stream；非法或重复路由字段在目录与模型上游之前返回 400。
-- [ ] 目录完全未命中时使用普通密钥，且调用方凭据、Cookie、Host、Content-Length 和无关 Header 不进入上游。
-- [ ] task/trace ID 的保留、独立生成和请求内复用对新入口生效。
-- [ ] 缺失或非法 Base URL、缺失普通密钥在模型上游前返回脱敏 500；当前合法值只拼接一次 `/v1/responses`。
-- [ ] 调用方缺失/空 Accept-Encoding 时上游收到 identity；非空或重复值按列表语义转发。
-- [ ] 非流式成功与完整上游错误保留 status、raw body、gzip Content-Encoding、未知端到端 Header 和重复字段。
-- [ ] 静态逐跳头、Connection 动态声明头、Content-Length、Server、Date 不被转发。
-- [ ] 非流式 body 完整读取前连接中断返回 502，超时返回 504，资源只关闭一次且活动请求记录清零。
-- [ ] 旧 Chat/Claude 入口和既有测试在 expand 阶段仍保持可运行。
+- [x] 合法非流式请求通过公开 Responses 入口到达 `/v1/responses` 上游，捕获的 body bytes 与调用方发送值完全相同。
+- [x] 代理只旁路读取 model/stream；非法或重复路由字段在目录与模型上游之前返回 400。
+- [x] 目录完全未命中时使用普通密钥，且调用方凭据、Cookie、Host、Content-Length 和无关 Header 不进入上游。
+- [x] task/trace ID 的保留、独立生成和请求内复用对新入口生效。
+- [x] 缺失或非法 Base URL、缺失普通密钥在模型上游前返回脱敏 500；当前合法值只拼接一次 `/v1/responses`。
+- [x] 调用方缺失/空 Accept-Encoding 时上游收到 identity；非空或重复值按列表语义转发。
+- [x] 非流式成功与完整上游错误保留 status、raw body、gzip Content-Encoding、未知端到端 Header 和重复字段。
+- [x] 静态逐跳头、Connection 动态声明头、Content-Length、Server、Date 不被转发。
+- [x] 非流式 body 完整读取前连接中断返回 502，超时返回 504，资源只关闭一次且活动请求记录清零。
+- [x] 旧 Chat/Claude 入口和既有测试在 expand 阶段仍保持可运行。
 
 ## 验证方式
 

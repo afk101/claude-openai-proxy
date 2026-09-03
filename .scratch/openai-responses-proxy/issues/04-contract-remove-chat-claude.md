@@ -12,13 +12,13 @@
 
 ## Acceptance Criteria
 
-- [ ] `/v1/chat/completions` 返回 404，且只有 `POST /v1/responses` 是公开推理入口。
-- [ ] Chat Completions ↔ Claude Messages 转换器、Claude 数据模型、旧流错误生成器和专属测试不再存在。
-- [ ] 旧 Claude client 和 `/v1/messages` 上游路径不再可达。
-- [ ] route resolver 的临时协议参数被收窄，最终只处理 Responses 能力。
-- [ ] anthropic-version、ANTHROPIC_VERSION、Chat stop reason 映射和 `[DONE]` 合成退出运行契约。
-- [ ] 删除仅限对应能力已经退出的代码；仍有用途的解释性注释不被误删。
-- [ ] 删除后完整 suite 仍通过，且敏感信息扫描无新增问题。
+- [x] `/v1/chat/completions` 返回 404，且只有 `POST /v1/responses` 是公开推理入口。
+- [x] Chat Completions ↔ Claude Messages 转换器、Claude 数据模型、旧流错误生成器和专属测试不再存在。
+- [x] 旧 Claude client 和 `/v1/messages` 上游路径不再可达。
+- [x] route resolver 的临时协议参数被收窄，最终只处理 Responses 能力。
+- [x] anthropic-version、ANTHROPIC_VERSION、Chat stop reason 映射和 `[DONE]` 合成退出运行契约。
+- [x] 删除仅限对应能力已经退出的代码；仍有用途的解释性注释不被误删。
+- [x] 删除后完整 suite 仍通过，且敏感信息扫描无新增问题。
 
 ## 验证方式
 

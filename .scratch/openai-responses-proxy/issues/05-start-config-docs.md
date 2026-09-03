@@ -12,14 +12,14 @@
 
 ## Acceptance Criteria
 
-- [ ] `start.sh` 保持可执行，能从任意 cwd 定位仓库并运行项目虚拟环境中的应用。
-- [ ] `.venv` 缺失或不完整时可创建/修复；完整环境不会重复 sync；所有 CLI 参数原样传递。
-- [ ] `.env` 继续由 python-dotenv 加载，Shell 不 source 它，文档明确修改后需重启。
-- [ ] Base URL 必填契约、普通密钥回退、代理密钥、目录行为和 7072 端口在 README 与 `.env.example` 一致。
-- [ ] 根路径、健康检查、FastAPI title 和 CLI help 只描述 Responses；健康检查不声称真实目录或模型成功。
-- [ ] distribution 与 console script 改名为 openai-responses-proxy，lockfile 同步，旧命令退出该分支。
-- [ ] README 提供可复制的非流式与流式 `/v1/responses` 示例，但不包含真实密钥。
-- [ ] 不新增 Python 依赖，完整自动验证保持通过。
+- [x] `start.sh` 保持可执行，能从任意 cwd 定位仓库并运行项目虚拟环境中的应用。
+- [x] `.venv` 缺失或不完整时可创建/修复；完整环境不会重复 sync；所有 CLI 参数原样传递。
+- [x] `.env` 继续由 python-dotenv 加载，Shell 不 source 它，文档明确修改后需重启。
+- [x] Base URL 必填契约、普通密钥回退、代理密钥、目录行为和 7072 端口在 README 与 `.env.example` 一致。
+- [x] 根路径、健康检查、FastAPI title 和 CLI help 只描述 Responses；健康检查不声称真实目录或模型成功。
+- [x] distribution 与 console script 改名为 openai-responses-proxy，lockfile 同步，旧命令退出该分支。
+- [x] README 提供可复制的非流式与流式 `/v1/responses` 示例，但不包含真实密钥。
+- [x] 不新增 Python 依赖，完整自动验证保持通过。
 
 ## 验证方式
 

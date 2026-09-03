@@ -2,6 +2,9 @@
 
 import base64
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +19,8 @@ from scripts.verify_live_responses import (
     parse_sse_events,
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _completed_payload(text="TEST OK"):
     """构造与真实 Responses 输出结构一致的最小完成响应。"""
@@ -29,6 +34,28 @@ def _completed_payload(text="TEST OK"):
             }
         ],
     }
+
+
+def test_importing_live_verifier_does_not_load_dotenv():
+    """验收器只连接本地代理，导入时不得触发生产配置模块读取仓库 .env。"""
+    probe = (
+        "import dotenv\n"
+        "def reject(*args, **kwargs):\n"
+        "    raise RuntimeError('dotenv must not be loaded')\n"
+        "dotenv.load_dotenv = reject\n"
+        "import scripts.live_verification_constants\n"
+        "import scripts.verify_live_responses\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_completed_assessment_requires_all_success_signals():

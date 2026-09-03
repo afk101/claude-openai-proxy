@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import Any, List, Tuple
+from typing import Any, List, NoReturn, Tuple
 
 from fastapi import HTTPException
 
@@ -21,6 +21,11 @@ class ResponsesEnvelope:
     stream: bool
 
 
+def _reject_non_standard_json_number(value: str) -> NoReturn:
+    """拒绝 Python 解码器默认接受、但 JSON 标准不允许的非有限数值。"""
+    raise ValueError(f"non-standard JSON number: {value}")
+
+
 def parse_responses_envelope(raw_body: bytes) -> ResponsesEnvelope:
     """从原始 body 旁路提取路由字段，不重建将要发送给上游的请求。
 
@@ -28,8 +33,12 @@ def parse_responses_envelope(raw_body: bytes) -> ResponsesEnvelope:
     路由决定的顶层 model/stream 重复项，其余字段及嵌套结构完全交给上游。
     """
     try:
-        parsed = json.loads(raw_body, object_pairs_hook=_JSONObjectPairs)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        parsed = json.loads(
+            raw_body,
+            object_pairs_hook=_JSONObjectPairs,
+            parse_constant=_reject_non_standard_json_number,
+        )
+    except (ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(
             status_code=400,
             detail=Constants.RESPONSES_INVALID_JSON_DETAIL,

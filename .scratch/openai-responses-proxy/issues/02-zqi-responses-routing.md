@@ -12,14 +12,14 @@
 
 ## Acceptance Criteria
 
-- [ ] 模型名称以原值、区分大小写精确匹配，不做别名或裁剪。
-- [ ] Responses 入口只在 apiNames 含精确小写 responses 的候选中选择；仅 messages 或大小写错误时返回 400 且不回退。
-- [ ] 可用候选按内网、外网、未知 identifier 和同组目录顺序选择。
-- [ ] 过期、耗尽或禁用候选被跳过；全部不可用时返回 503 且不回退。
-- [ ] 目录完全未出现模型时使用普通密钥；目录/auth/JSON/schema 失败时沿用明确错误且不回退。
-- [ ] 套餐 key 覆盖普通 key，并携带 X-Ai-Forward-Url、X-Pkg-Model 和有效邮箱 Header。
-- [ ] 普通密钥路径不携带任何套餐 Header。
-- [ ] 旧 Chat 入口在 contract issue 前仍按 messages 协议通过原测试。
+- [x] 模型名称以原值、区分大小写精确匹配，不做别名或裁剪。
+- [x] Responses 入口只在 apiNames 含精确小写 responses 的候选中选择；仅 messages 或大小写错误时返回 400 且不回退。
+- [x] 可用候选按内网、外网、未知 identifier 和同组目录顺序选择。
+- [x] 过期、耗尽或禁用候选被跳过；全部不可用时返回 503 且不回退。
+- [x] 目录完全未出现模型时使用普通密钥；目录/auth/JSON/schema 失败时沿用明确错误且不回退。
+- [x] 套餐 key 覆盖普通 key，并携带 X-Ai-Forward-Url、X-Pkg-Model 和有效邮箱 Header。
+- [x] 普通密钥路径不携带任何套餐 Header。
+- [x] 旧 Chat 入口在 contract issue 前仍按 messages 协议通过原测试。
 
 ## 验证方式
 

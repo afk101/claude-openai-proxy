@@ -33,6 +33,39 @@ class BufferedUpstreamResponse:
     raw_headers: Tuple[Tuple[bytes, bytes], ...]
 
 
+async def _close_httpx_resources(
+    response: Optional[httpx.Response],
+    http_client: httpx.AsyncClient,
+) -> None:
+    """依次关闭 response/client，并在完整清理后继续传播首次取消。
+
+    普通关闭异常只记录类型，不能覆盖已经取得的业务响应；CancelledError
+    则必须在尝试关闭两个资源后恢复，保证任务取消语义和资源回收同时成立。
+    """
+    cancellation: Optional[asyncio.CancelledError] = None
+    try:
+        if response is not None:
+            await response.aclose()
+    except asyncio.CancelledError as exc:
+        cancellation = exc
+    except Exception as exc:
+        logger.warning(
+            "responses_response_close_error exception_type=%s",
+            type(exc).__name__,
+        )
+    try:
+        await http_client.aclose()
+    except asyncio.CancelledError as exc:
+        cancellation = cancellation or exc
+    except Exception as exc:
+        logger.warning(
+            "responses_client_close_error exception_type=%s",
+            type(exc).__name__,
+        )
+    if cancellation is not None:
+        raise cancellation
+
+
 class ResponsesUpstreamClient:
     """封装 Responses 原字节转发与资源生命周期。"""
 
@@ -110,19 +143,14 @@ class ResponsesUpstreamClient:
         Content-Encoding。无论连接、读取或取消发生在哪一阶段，finally 都会
         幂等关闭 response/client 并移除活动请求记录。
         """
-        target_url = self.build_responses_url()
-        headers = self.build_headers(request_id, request_context, route, accept_encoding)
-        http_client = self._create_http_client()
-        response: Optional[httpx.Response] = None
-        self.active_requests.add(request_id)
+        response, http_client = await self._open_upstream_response(
+            raw_body,
+            request_id,
+            request_context,
+            route,
+            accept_encoding,
+        )
         try:
-            upstream_request = http_client.build_request(
-                Constants.RESPONSES_HTTP_METHOD,
-                target_url,
-                headers=headers,
-                content=raw_body,
-            )
-            response = await http_client.send(upstream_request, stream=True)
             raw_headers = self.filter_response_headers(response.headers.raw)
             chunks = [chunk async for chunk in response.aiter_raw()]
             return BufferedUpstreamResponse(
@@ -130,22 +158,10 @@ class ResponsesUpstreamClient:
                 body=b"".join(chunks),
                 raw_headers=raw_headers,
             )
-        except httpx.TimeoutException as exc:
-            raise HTTPException(
-                status_code=504,
-                detail=Constants.RESPONSES_UPSTREAM_TIMEOUT_DETAIL,
-            ) from exc
         except httpx.RequestError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=Constants.RESPONSES_UPSTREAM_CONNECTION_DETAIL,
-            ) from exc
+            self._raise_upstream_request_error(exc)
         finally:
-            try:
-                await self._close_upstream_resources(response, http_client)
-            finally:
-                # 即使任务取消打断清理 await，活动记录也必须从进程内状态移除。
-                self.active_requests.discard(request_id)
+            await self._close_request(response, http_client, request_id)
 
     async def open_stream_response(
         self,
@@ -161,6 +177,33 @@ class ResponsesUpstreamClient:
         映射为 504/502；一旦取得上游响应，status、Header 和 raw body 的所有权
         都交给 ``OpenedResponsesStream``，避免 endpoint 与 HTTP 客户端重复关闭。
         """
+        response, http_client = await self._open_upstream_response(
+            raw_body,
+            request_id,
+            request_context,
+            route,
+            accept_encoding,
+        )
+        return OpenedResponsesStream(
+            response=response,
+            http_client=http_client,
+            raw_headers=self.filter_response_headers(response.headers.raw),
+            on_close=lambda: self.active_requests.discard(request_id),
+        )
+
+    async def _open_upstream_response(
+        self,
+        raw_body: bytes,
+        request_id: str,
+        request_context: UpstreamRequestContext,
+        route: Optional[ZqiRoute],
+        accept_encoding: str,
+    ) -> Tuple[httpx.Response, httpx.AsyncClient]:
+        """统一建立 raw 上游响应，并在连接失败或取消时回收全部资源。
+
+        成功返回后，调用方接管 response/client 和活动记录；失败路径在这里完成
+        清理，避免流式与非流式连接阶段分别维护错误映射和生命周期逻辑。
+        """
         target_url = self.build_responses_url()
         headers = self.build_headers(request_id, request_context, route, accept_encoding)
         http_client = self._create_http_client()
@@ -174,37 +217,39 @@ class ResponsesUpstreamClient:
                 content=raw_body,
             )
             response = await http_client.send(upstream_request, stream=True)
-            return OpenedResponsesStream(
-                response=response,
-                http_client=http_client,
-                raw_headers=self.filter_response_headers(response.headers.raw),
-                on_close=lambda: self.active_requests.discard(request_id),
-            )
-        except httpx.TimeoutException as exc:
-            try:
-                await self._close_upstream_resources(response, http_client)
-            finally:
-                self.active_requests.discard(request_id)
+            return response, http_client
+        except httpx.RequestError as exc:
+            await self._close_request(response, http_client, request_id)
+            self._raise_upstream_request_error(exc)
+        except BaseException:
+            # CancelledError 不属于普通网络错误，必须原样传播；传播前仍释放已创建资源。
+            await self._close_request(response, http_client, request_id)
+            raise
+
+    @staticmethod
+    def _raise_upstream_request_error(exception: httpx.RequestError) -> NoReturn:
+        """把连接/读取异常稳定映射为 502 或 504，且不暴露远端异常文本。"""
+        if isinstance(exception, httpx.TimeoutException):
             raise HTTPException(
                 status_code=504,
                 detail=Constants.RESPONSES_UPSTREAM_TIMEOUT_DETAIL,
-            ) from exc
-        except httpx.RequestError as exc:
-            try:
-                await self._close_upstream_resources(response, http_client)
-            finally:
-                self.active_requests.discard(request_id)
-            raise HTTPException(
-                status_code=502,
-                detail=Constants.RESPONSES_UPSTREAM_CONNECTION_DETAIL,
-            ) from exc
-        except BaseException:
-            # CancelledError 不属于普通网络错误，必须原样传播；传播前仍释放已创建资源。
-            try:
-                await self._close_upstream_resources(response, http_client)
-            finally:
-                self.active_requests.discard(request_id)
-            raise
+            ) from exception
+        raise HTTPException(
+            status_code=502,
+            detail=Constants.RESPONSES_UPSTREAM_CONNECTION_DETAIL,
+        ) from exception
+
+    async def _close_request(
+        self,
+        response: Optional[httpx.Response],
+        http_client: httpx.AsyncClient,
+        request_id: str,
+    ) -> None:
+        """关闭单次请求资源，并在清理被取消时也移除活动请求记录。"""
+        try:
+            await _close_httpx_resources(response, http_client)
+        finally:
+            self.active_requests.discard(request_id)
 
     def build_headers(
         self,
@@ -257,28 +302,6 @@ class ResponsesUpstreamClient:
         """创建带统一超时和可替换远端 transport 的异步客户端。"""
         return httpx.AsyncClient(timeout=self.timeout, transport=self.transport)
 
-    @staticmethod
-    async def _close_upstream_resources(
-        response: Optional[httpx.Response], http_client: httpx.AsyncClient
-    ) -> None:
-        """依次关闭上游响应与客户端，不让普通清理错误覆盖业务结果。"""
-        try:
-            if response is not None:
-                await response.aclose()
-        except Exception as exc:
-            logger.warning(
-                "responses_response_close_error exception_type=%s",
-                type(exc).__name__,
-            )
-        try:
-            await http_client.aclose()
-        except Exception as exc:
-            logger.warning(
-                "responses_client_close_error exception_type=%s",
-                type(exc).__name__,
-            )
-
-
 class OpenedResponsesStream:
     """持有已建立的 Responses raw stream，并提供幂等资源关闭边界。"""
 
@@ -313,26 +336,7 @@ class OpenedResponsesStream:
             if self._closed:
                 return
             self._closed = True
-            cancellation: Optional[asyncio.CancelledError] = None
             try:
-                await self.response.aclose()
-            except asyncio.CancelledError as exc:
-                cancellation = exc
-            except Exception as exc:
-                logger.warning(
-                    "responses_response_close_error exception_type=%s",
-                    type(exc).__name__,
-                )
-            try:
-                await self.http_client.aclose()
-            except asyncio.CancelledError as exc:
-                cancellation = cancellation or exc
-            except Exception as exc:
-                logger.warning(
-                    "responses_client_close_error exception_type=%s",
-                    type(exc).__name__,
-                )
+                await _close_httpx_resources(self.response, self.http_client)
             finally:
                 self.on_close()
-            if cancellation is not None:
-                raise cancellation

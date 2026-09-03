@@ -132,7 +132,7 @@ curl 'http://127.0.0.1:7072/health'
 uv sync --dev
 uv run python -m pytest -q
 bash tests/test_start_sh.sh
-uv run python -m compileall -q src tests
+uv run python -m compileall -q src scripts tests
 uv lock --check
 ```
 
