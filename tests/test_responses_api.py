@@ -1,0 +1,794 @@
+"""Responses 公开入口的端到端行为测试。"""
+
+import asyncio
+import gzip
+import json
+import logging
+import re
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from src.core.zqi_catalog import ZqiCatalogClient, ZqiRouteResolver
+from src.main import app
+
+
+class _StaticAsyncByteStream(httpx.AsyncByteStream):
+    """模拟真实 transport 返回的尚未消费异步响应流。"""
+
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.close_count = 0
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+    async def aclose(self):
+        self.close_count += 1
+
+
+class _TrackingMockTransport(httpx.MockTransport):
+    """记录上游 HTTP client 是否最终关闭其 transport。"""
+
+    def __init__(self, handler):
+        super().__init__(handler)
+        self.close_count = 0
+
+    async def aclose(self):
+        self.close_count += 1
+        await super().aclose()
+
+
+class _FailingAsyncByteStream(httpx.AsyncByteStream):
+    """先产生不完整字节再抛错，用于模拟上游 body 读取阶段中断。"""
+
+    def __init__(self, exception):
+        self.exception = exception
+        self.close_count = 0
+
+    async def __aiter__(self):
+        yield b"partial-body-must-not-escape"
+        raise self.exception
+
+    async def aclose(self):
+        self.close_count += 1
+
+
+class _FailingCloseTransport(_TrackingMockTransport):
+    """模拟 HTTP client 在最终关闭 transport 时报告异常。"""
+
+    async def aclose(self):
+        self.close_count += 1
+        raise RuntimeError("simulated transport close failure")
+
+
+async def _call_app_directly(raw_body: bytes, headers=None):
+    """直接驱动公开 ASGI 接口，以观察未被测试客户端改写的响应字节和 Header。"""
+    received_request = False
+    sent_messages = []
+    raw_headers = [(b"host", b"local.test"), (b"content-type", b"application/json")]
+    raw_headers.extend(headers or [])
+
+    async def receive():
+        nonlocal received_request
+        if not received_request:
+            received_request = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "headers": raw_headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("local.test", 80),
+        "root_path": "",
+        "state": {},
+    }
+    await app(scope, receive, send)
+    start = next(message for message in sent_messages if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent_messages
+        if message["type"] == "http.response.body"
+    )
+    return start["status"], start["headers"], body
+
+
+def _write_fake_wiscode_auth(tmp_path: Path) -> Path:
+    """写入只供 MockTransport 使用的虚假认证，避免测试读取真实用户配置。"""
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(
+        json.dumps(
+            {
+                "host": "catalog.example.test",
+                "access_token": "fake-catalog-token",
+                "mail": "tester@example.test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return auth_path
+
+
+def _install_empty_catalog(monkeypatch, tmp_path: Path) -> None:
+    """让公开入口经过真实 resolver，并由虚假目录确认模型完全未命中。"""
+    import src.api.endpoints as endpoints
+
+    async def catalog_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"context": {"code": 0}, "data": {"list": []}},
+        )
+
+    catalog = ZqiCatalogClient(
+        auth_path=_write_fake_wiscode_auth(tmp_path),
+        transport=httpx.MockTransport(catalog_handler),
+    )
+    monkeypatch.setattr(endpoints, "zqi_route_resolver", ZqiRouteResolver(catalog))
+
+
+def _install_counted_empty_catalog(monkeypatch, tmp_path: Path):
+    """安装记录调用次数的空目录，用于证明本地错误不会触发外部目录请求。"""
+    import src.api.endpoints as endpoints
+
+    requests = []
+
+    async def catalog_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"context": {"code": 0}, "data": {"list": []}},
+        )
+
+    catalog = ZqiCatalogClient(
+        auth_path=_write_fake_wiscode_auth(tmp_path),
+        transport=httpx.MockTransport(catalog_handler),
+    )
+    monkeypatch.setattr(endpoints, "zqi_route_resolver", ZqiRouteResolver(catalog))
+    return requests
+
+
+def test_non_stream_responses_forwards_original_body_with_ordinary_key(
+    monkeypatch, tmp_path
+):
+    """目录未命中时，公开入口应以普通密钥原样转发请求和响应。"""
+    import src.api.endpoints as endpoints
+
+    captured = {}
+    raw_body = (
+        b'{  "model" : "ordinary/model", "input" : "\xe4\xbd\xa0\xe5\xa5\xbd",'
+        b' "unknown_future_field": {"kept":true}, "stream": false }'
+    )
+    upstream_body = b'{"id":"resp_1","status":"completed","unknown":true}'
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = request.headers
+        captured["body"] = await request.aread()
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream([upstream_body]),
+            headers={"Content-Type": "application/json", "X-Upstream-Version": "future"},
+        )
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test/aiproxy")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=raw_body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == upstream_body
+    assert response.headers["x-upstream-version"] == "future"
+    assert captured["url"] == "https://proxy.example.test/aiproxy/v1/responses"
+    assert captured["body"] == raw_body
+    assert captured["headers"]["authorization"] == "Bearer fake-ordinary-key"
+    assert captured["headers"]["x-api-key"] == "fake-ordinary-key"
+
+
+def test_invalid_routing_envelope_returns_400_before_external_requests(
+    monkeypatch, tmp_path
+):
+    """影响路由的非法或重复字段应在任何外部请求前被拒绝。"""
+    import src.api.endpoints as endpoints
+
+    catalog_requests = _install_counted_empty_catalog(monkeypatch, tmp_path)
+    upstream_requests = []
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        upstream_requests.append(request)
+        return httpx.Response(200, stream=_StaticAsyncByteStream([b"unexpected"]))
+
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+    invalid_bodies = [
+        b"not-json",
+        b"[]",
+        b'{"input":"hello"}',
+        b'{"model":42,"input":"hello"}',
+        b'{"model":"   ","input":"hello"}',
+        b'{"model":"ordinary/model","stream":"false"}',
+        b'{"model":"first","model":"second"}',
+        b'{"model":"ordinary/model","stream":false,"stream":true}',
+    ]
+
+    client = TestClient(app)
+    for raw_body in invalid_bodies:
+        response = client.post(
+            "/v1/responses",
+            content=raw_body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 400
+
+    assert catalog_requests == []
+    assert upstream_requests == []
+
+
+@pytest.mark.parametrize(
+    "invalid_base_url",
+    [
+        None,
+        "",
+        "proxy.example.test/aiproxy",
+        "ftp://proxy.example.test/aiproxy",
+        "https://proxy.example.test/aiproxy?credential=hidden",
+        "https://proxy.example.test/aiproxy#fragment",
+        "https://proxy.example.test/v1",
+        "https://proxy.example.test/aiproxy/v1/",
+        "https://proxy.example.test/aiproxy/v1/responses/",
+        "https://proxy.example.test:not-a-port/aiproxy",
+        "https://[invalid-ipv6/aiproxy",
+        "https://bad host.example.test/aiproxy",
+        "https://proxy.example.test/aiproxy?",
+        "https://proxy.example.test/aiproxy#",
+    ],
+)
+def test_invalid_base_url_returns_redacted_500_before_catalog(
+    monkeypatch, tmp_path, invalid_base_url
+):
+    """Responses 服务根地址缺失或非法时应快速失败，且不得回显配置值。"""
+    import src.api.endpoints as endpoints
+
+    catalog_requests = _install_counted_empty_catalog(monkeypatch, tmp_path)
+    upstream_requests = []
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        upstream_requests.append(request)
+        return httpx.Response(200, stream=_StaticAsyncByteStream([b"unexpected"]))
+
+    monkeypatch.setattr(endpoints.responses_client, "base_url", invalid_base_url)
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "CLAUDE_BASE_URL 配置缺失或格式非法"}
+    if invalid_base_url:
+        assert invalid_base_url not in response.text
+    assert catalog_requests == []
+    assert upstream_requests == []
+
+
+def test_missing_ordinary_key_returns_500_without_model_upstream(
+    monkeypatch, tmp_path
+):
+    """目录未命中且普通密钥缺失时，应在模型上游连接前返回配置错误。"""
+    import src.api.endpoints as endpoints
+
+    catalog_requests = _install_counted_empty_catalog(monkeypatch, tmp_path)
+    upstream_requests = []
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        upstream_requests.append(request)
+        return httpx.Response(200, stream=_StaticAsyncByteStream([b"unexpected"]))
+
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", None)
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "普通上游密钥未配置，请设置 CLAUDE_API_KEY 或 ANTHROPIC_API_KEY"
+    }
+    assert len(catalog_requests) == 1
+    assert upstream_requests == []
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_invalid_proxy_key_returns_401_before_catalog_or_model_upstream(
+    monkeypatch, tmp_path
+):
+    """代理访问密钥错误时，鉴权必须成为最外层门禁。"""
+    import src.api.endpoints as endpoints
+
+    catalog_requests = _install_counted_empty_catalog(monkeypatch, tmp_path)
+    upstream_requests = []
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        upstream_requests.append(request)
+        return httpx.Response(200, stream=_StaticAsyncByteStream([b"unexpected"]))
+
+    monkeypatch.setattr(endpoints.config, "client_api_key", "fake-proxy-access-key")
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers={"Authorization": "Bearer wrong-client-key"},
+    )
+
+    assert response.status_code == 401
+    assert catalog_requests == []
+    assert upstream_requests == []
+
+
+@pytest.mark.parametrize(
+    "client_headers",
+    [
+        {"Authorization": "Bearer fake-proxy-access-key"},
+        {"X-Api-Key": "fake-proxy-access-key"},
+    ],
+)
+def test_valid_proxy_key_allows_request_but_upstream_uses_ordinary_key(
+    monkeypatch, tmp_path, client_headers
+):
+    """两种代理凭据均可放行，但上游身份只能来自普通密钥配置。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    captured = {}
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = request.headers
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream([b'{"status":"completed"}']),
+        )
+
+    monkeypatch.setattr(endpoints.config, "client_api_key", "fake-proxy-access-key")
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers=client_headers,
+    )
+
+    assert response.status_code == 200
+    assert captured["headers"]["authorization"] == "Bearer fake-ordinary-key"
+    assert captured["headers"]["x-api-key"] == "fake-ordinary-key"
+
+
+def test_upstream_headers_are_controlled_and_preserve_client_context(
+    monkeypatch, tmp_path
+):
+    """只允许代理选定字段进入上游，并保留调用方提供的 task/trace 标识。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    captured = {}
+    raw_body = b'{"model":"ordinary/model","input":"hello"}'
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = request.headers
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream([b'{"status":"completed"}']),
+        )
+
+    monkeypatch.setattr(endpoints.config, "client_api_key", None)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=raw_body,
+        headers=[
+            ("Authorization", "Bearer inbound-credential"),
+            ("X-Api-Key", "inbound-api-key"),
+            ("Cookie", "session=must-not-forward"),
+            ("Host", "attacker.example.test"),
+            ("Content-Length", "999"),
+            ("X-Unrelated", "must-not-forward"),
+            ("X-Client-Task-Id", "client-task-original"),
+            ("X-Client-Trace-Id", "client-trace-original"),
+            ("Accept-Encoding", "gzip"),
+            ("Accept-Encoding", "br"),
+        ],
+    )
+
+    headers = captured["headers"]
+    assert response.status_code == 200
+    assert headers["content-type"] == "application/json"
+    assert headers["authorization"] == "Bearer fake-ordinary-key"
+    assert headers["x-api-key"] == "fake-ordinary-key"
+    assert headers["x-src"] == "ide"
+    assert headers["x-client-task-id"] == "client-task-original"
+    assert headers["x-client-trace-id"] == "client-trace-original"
+    assert headers["accept-encoding"] == "gzip, br"
+    assert headers["host"] == "proxy.example.test"
+    assert headers["content-length"] == str(len(raw_body))
+    assert "x-request-id" in headers
+    assert "cookie" not in headers
+    assert "x-unrelated" not in headers
+    assert "anthropic-version" not in headers
+    assert "x-ai-forward-url" not in headers
+    assert "x-ai-forward-email" not in headers
+    assert "x-pkg-model" not in headers
+
+
+def test_missing_context_ids_are_distinct_and_empty_accept_encoding_uses_identity(
+    monkeypatch, tmp_path
+):
+    """空上下文分别生成新 ID，调用方未声明压缩能力时只请求 identity。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    captured = {}
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = request.headers
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream([b'{"status":"completed"}']),
+        )
+
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers={
+            "X-Client-Task-Id": "   ",
+            "X-Client-Trace-Id": "",
+            "Accept-Encoding": "",
+        },
+    )
+
+    headers = captured["headers"]
+    assert response.status_code == 200
+    assert re.fullmatch(r"[0-9a-f]{32}", headers["x-client-task-id"])
+    assert re.fullmatch(r"[0-9a-f]{32}", headers["x-client-trace-id"])
+    assert headers["x-client-task-id"] != headers["x-client-trace-id"]
+    assert headers["accept-encoding"] == "identity"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "upstream_body", "content_type"),
+    [
+        (200, b'{"status":"completed"}', "application/json"),
+        (402, b'{"error":{"message":"quota exhausted"}}', "application/json"),
+        (429, b"rate limited as plain text", "text/plain; charset=utf-8"),
+        (500, b"\x00opaque-upstream-error\xff", "application/octet-stream"),
+    ],
+)
+def test_complete_upstream_responses_preserve_status_body_and_end_to_end_headers(
+    monkeypatch, tmp_path, status_code, upstream_body, content_type
+):
+    """完整取得的成功或错误响应都应保持原始状态、body 和端到端 Header。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            stream=_StaticAsyncByteStream([upstream_body]),
+            headers={
+                "Content-Type": content_type,
+                "Retry-After": "17",
+                "X-Future-Response-Header": "preserved",
+            },
+        )
+
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers={"Accept-Encoding": "identity"},
+    )
+
+    assert response.status_code == status_code
+    assert response.content == upstream_body
+    assert response.headers["content-type"] == content_type
+    assert response.headers["retry-after"] == "17"
+    assert response.headers["x-future-response-header"] == "preserved"
+
+
+def test_direct_asgi_preserves_gzip_and_duplicate_headers_while_filtering_hops(
+    monkeypatch, tmp_path
+):
+    """原始 ASGI 响应应保持压缩配对及重复字段，并剔除当前连接专属 Header。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    compressed_body = gzip.compress(b'{"status":"completed"}')
+    response_stream = _StaticAsyncByteStream(
+        [compressed_body[:5], compressed_body[5:]]
+    )
+    captured = {}
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured["accept_encoding"] = request.headers["accept-encoding"]
+        return httpx.Response(
+            206,
+            stream=response_stream,
+            headers=[
+                (b"Content-Type", b"application/json"),
+                (b"Content-Encoding", b"gzip"),
+                (b"Set-Cookie", b"first=1"),
+                (b"Set-Cookie", b"second=2"),
+                (b"X-Future", b"preserved"),
+                (b"Connection", b"X-Dynamic-Hop, Keep-Alive"),
+                (b"X-Dynamic-Hop", b"remove-me"),
+                (b"Keep-Alive", b"timeout=5"),
+                (b"Transfer-Encoding", b"chunked"),
+                (b"Content-Length", b"999"),
+                (b"Server", b"hidden-server"),
+                (b"Date", b"Thu, 01 Jan 1970 00:00:00 GMT"),
+            ],
+        )
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    status_code, raw_headers, response_body = asyncio.run(
+        _call_app_directly(b'{"model":"ordinary/model","input":"hello"}')
+    )
+
+    normalized_headers = [(name.lower(), value) for name, value in raw_headers]
+    header_names = {name for name, _ in normalized_headers}
+    assert status_code == 206
+    assert response_body == compressed_body
+    assert (b"content-encoding", b"gzip") in normalized_headers
+    assert [
+        value for name, value in normalized_headers if name == b"set-cookie"
+    ] == [b"first=1", b"second=2"]
+    assert (b"x-future", b"preserved") in normalized_headers
+    assert b"connection" not in header_names
+    assert b"x-dynamic-hop" not in header_names
+    assert b"keep-alive" not in header_names
+    assert b"transfer-encoding" not in header_names
+    assert b"content-length" not in header_names
+    assert b"server" not in header_names
+    assert b"date" not in header_names
+    assert captured["accept_encoding"] == "identity"
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+@pytest.mark.parametrize(
+    ("upstream_exception", "expected_status", "expected_detail"),
+    [
+        (
+            httpx.ReadError("upstream body interrupted"),
+            502,
+            "连接上游 Responses 服务失败，请稍后重试",
+        ),
+        (
+            httpx.ReadTimeout("upstream body timed out"),
+            504,
+            "连接上游 Responses 服务超时，请稍后重试",
+        ),
+    ],
+)
+def test_incomplete_upstream_body_maps_error_and_closes_resources_once(
+    monkeypatch,
+    tmp_path,
+    upstream_exception,
+    expected_status,
+    expected_detail,
+):
+    """下游开始前的读取中断不得泄露部分 body，所有上游资源只能关闭一次。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    response_stream = _FailingAsyncByteStream(upstream_exception)
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=response_stream)
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers={"Accept-Encoding": "identity"},
+    )
+
+    assert response.status_code == expected_status
+    assert response.json() == {"detail": expected_detail}
+    assert b"partial-body-must-not-escape" not in response.content
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_upstream_connect_failure_returns_502_and_clears_active_request(
+    monkeypatch, tmp_path
+):
+    """尚未取得响应的连接失败也应成为脱敏 502，并清理客户端与活动记录。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("private network detail", request=request)
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers={"Accept-Encoding": "identity"},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "连接上游 Responses 服务失败，请稍后重试"
+    }
+    assert "private network detail" not in response.text
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_responses_logs_exclude_bodies_and_credentials(
+    monkeypatch, tmp_path, caplog
+):
+    """运行日志只记录元数据，不得包含请求、响应或任何访问凭据。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    request_secret = "request-body-private-marker"
+    response_secret = b"response-body-private-marker"
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            402,
+            stream=_StaticAsyncByteStream([response_secret]),
+            headers={"Content-Type": "text/plain"},
+        )
+
+    monkeypatch.setattr(endpoints.config, "client_api_key", "fake-client-access-marker")
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-upstream-key-marker")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+    caplog.set_level(logging.INFO)
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=(
+            '{"model":"ordinary/model","input":"%s"}' % request_secret
+        ).encode(),
+        headers={"Authorization": "Bearer fake-client-access-marker"},
+    )
+
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert response.status_code == 402
+    assert "responses_received" in log_text
+    assert "responses_completed" in log_text
+    assert request_secret not in log_text
+    assert response_secret.decode() not in log_text
+    assert "fake-client-access-marker" not in log_text
+    assert "fake-upstream-key-marker" not in log_text
+    assert "fake-catalog-token" not in log_text
+
+
+def test_transport_close_failure_does_not_replace_complete_upstream_response(
+    monkeypatch, tmp_path
+):
+    """响应已完整读取后，清理异常不得覆盖响应，活动记录仍必须移除。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    response_stream = _StaticAsyncByteStream([b'{"status":"completed"}'])
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=response_stream)
+
+    transport = _FailingCloseTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello"}',
+        headers={"Accept-Encoding": "identity"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == b'{"status":"completed"}'
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
