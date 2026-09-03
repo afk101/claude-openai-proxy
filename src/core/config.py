@@ -10,10 +10,8 @@ class Config:
 
     def __init__(self) -> None:
         self.claude_api_key = os.environ.get("CLAUDE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-        # Responses 新入口必须显式配置服务根地址；旧 Claude 链路在 expand 阶段仍保留原默认值。
+        # Responses 入口必须显式配置服务根地址，不能回退到其他协议的默认上游。
         self.responses_base_url = os.environ.get("CLAUDE_BASE_URL")
-        self.claude_base_url = os.environ.get("CLAUDE_BASE_URL", "https://api.anthropic.com")
-        self.anthropic_version = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
         self.client_api_key = os.environ.get("PROXY_API_KEY")
         self.host = os.environ.get("HOST", "0.0.0.0")
         self.port = int(os.environ.get("PORT", str(Constants.DEFAULT_PORT)))

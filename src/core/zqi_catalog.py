@@ -252,17 +252,8 @@ class ZqiRouteResolver:
     def __init__(self, catalog: ZqiCatalogClient) -> None:
         self.catalog = catalog
 
-    async def resolve(
-        self,
-        model: str,
-        api_name: str = Constants.ZQI_API_NAME_MESSAGES,
-    ) -> ZqiRoute:
-        """按完整模型名和内部协议能力解析普通或套餐路由。
-
-        ``api_name`` 只由各协议入口使用集中常量传入，不读取 HTTP 参数。
-        expand 阶段保留 Messages 默认值，使旧 Chat 入口在最终 contract
-        删除前仍可运行；Responses 入口必须显式传入它自己的协议常量。
-        """
+    async def resolve(self, model: str) -> ZqiRoute:
+        """按完整模型名解析具备 Responses 能力的普通或套餐路由。"""
         snapshot = await self.catalog.get_snapshot()
         matches = [
             (package, model_item)
@@ -273,18 +264,20 @@ class ZqiRouteResolver:
         if not matches:
             return ZqiRoute(model, None, {})
 
-        protocol_matches = [
-            item for item in matches if api_name in item[1]["apiNames"]
+        responses_matches = [
+            item
+            for item in matches
+            if Constants.ZQI_API_NAME_RESPONSES in item[1]["apiNames"]
         ]
-        if not protocol_matches:
+        if not responses_matches:
             raise HTTPException(
                 status_code=400,
-                detail=f"模型 {model} 不支持 {api_name} 协议",
+                detail=f"模型 {model} 不支持 {Constants.ZQI_API_NAME_RESPONSES} 协议",
             )
 
         now = self.catalog.now()
         reasons = []
-        selected = self._select_package(protocol_matches, now, reasons)
+        selected = self._select_package(responses_matches, now, reasons)
         if selected is None:
             reason = "、".join(dict.fromkeys(reasons)) or "没有可用套餐"
             raise HTTPException(

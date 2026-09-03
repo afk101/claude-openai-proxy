@@ -299,6 +299,13 @@ def test_non_stream_responses_forwards_original_body_with_ordinary_key(
     assert captured["headers"]["x-api-key"] == "fake-ordinary-key"
 
 
+def test_legacy_chat_completions_route_is_not_public():
+    """最终产品面只提供 Responses Create，旧 Chat 路径必须彻底退出。"""
+    response = TestClient(app).post("/v1/chat/completions", json={})
+
+    assert response.status_code == 404
+
+
 def test_responses_endpoint_uses_package_key_and_all_package_headers(
     monkeypatch, tmp_path
 ):

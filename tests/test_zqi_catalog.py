@@ -41,7 +41,7 @@ def package(
         "models": [
             {
                 "name": model_name,
-                "apiNames": ["messages"] if api_names is None else api_names,
+                "apiNames": ["responses"] if api_names is None else api_names,
                 "enabled": enabled,
             }
         ],
@@ -204,19 +204,18 @@ def test_resolves_package_route_and_preserves_model_name(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("api_names", "requested_api_name", "expected_status"),
+    ("api_names", "expected_status"),
     [
-        (["responses"], "responses", None),
-        (["messages", "responses"], "responses", None),
-        (["messages"], "responses", 400),
-        (["Responses"], "responses", 400),
-        (["responses"], "messages", 400),
+        (["responses"], None),
+        (["messages", "responses"], None),
+        (["messages"], 400),
+        (["Responses"], 400),
     ],
 )
-def test_resolver_selects_only_exact_requested_api_name(
-    tmp_path, api_names, requested_api_name, expected_status
+def test_resolver_selects_only_exact_responses_api_name(
+    tmp_path, api_names, expected_status
 ):
-    """路由只接受内部指定且大小写精确匹配的目录协议能力。"""
+    """最终路由只能选择大小写精确匹配的 Responses 目录能力。"""
 
     async def run():
         auth_path = auth_payload(tmp_path)
@@ -235,14 +234,14 @@ def test_resolver_selects_only_exact_requested_api_name(
         )
         resolver = ZqiRouteResolver(catalog)
         if expected_status is None:
-            route = await resolver.resolve("pkg/model", requested_api_name)
+            route = await resolver.resolve("pkg/model")
             assert route.api_key == "package-key"
             return
 
         with pytest.raises(HTTPException) as error:
-            await resolver.resolve("pkg/model", requested_api_name)
+            await resolver.resolve("pkg/model")
         assert error.value.status_code == expected_status
-        assert requested_api_name in str(error.value.detail)
+        assert "responses" in str(error.value.detail)
 
     asyncio.run(run())
 
@@ -276,10 +275,7 @@ def test_responses_model_match_is_exact_and_only_missing_model_uses_default_rout
             auth_path=auth_path,
             transport=httpx.MockTransport(handler),
         )
-        route = await ZqiRouteResolver(catalog).resolve(
-            requested_model,
-            "responses",
-        )
+        route = await ZqiRouteResolver(catalog).resolve(requested_model)
 
         assert route.model == requested_model
         if expected_package_id is None:
@@ -399,7 +395,7 @@ def test_responses_route_keeps_package_priority_and_availability_filters(
             auth_path=auth_path,
             transport=httpx.MockTransport(handler),
         )
-        route = await ZqiRouteResolver(catalog).resolve("pkg/model", "responses")
+        route = await ZqiRouteResolver(catalog).resolve("pkg/model")
 
         assert route.headers["X-Pkg-Model"] == expected_package_id
 
@@ -440,7 +436,7 @@ def test_responses_model_with_only_unavailable_packages_returns_503(tmp_path):
             transport=httpx.MockTransport(handler),
         )
         with pytest.raises(HTTPException) as error:
-            await ZqiRouteResolver(catalog).resolve("pkg/model", "responses")
+            await ZqiRouteResolver(catalog).resolve("pkg/model")
 
         assert error.value.status_code == 503
         assert "套餐已过期" in str(error.value.detail)
@@ -555,7 +551,7 @@ def test_invalid_route_schema_is_explicit(tmp_path, field, expected):
         auth_path = auth_payload(tmp_path)
         item = package("pkg/model")
         if field == "apiNames":
-            item["models"][0][field] = "messages"
+            item["models"][0][field] = "responses"
         elif field == "expireAt":
             item[field] = "invalid-date"
         else:
