@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from src.core.config import Config
 from src.core.zqi_catalog import ZqiCatalogClient, ZqiRouteResolver
@@ -46,12 +47,13 @@ class _TrackingMockTransport(httpx.MockTransport):
 class _FailingAsyncByteStream(httpx.AsyncByteStream):
     """先产生不完整字节再抛错，用于模拟上游 body 读取阶段中断。"""
 
-    def __init__(self, exception):
+    def __init__(self, exception, first_chunk=b"partial-body-must-not-escape"):
         self.exception = exception
+        self.first_chunk = first_chunk
         self.close_count = 0
 
     async def __aiter__(self):
-        yield b"partial-body-must-not-escape"
+        yield self.first_chunk
         raise self.exception
 
     async def aclose(self):
@@ -64,6 +66,31 @@ class _FailingCloseTransport(_TrackingMockTransport):
     async def aclose(self):
         self.close_count += 1
         raise RuntimeError("simulated transport close failure")
+
+
+class _GatedAsyncByteStream(httpx.AsyncByteStream):
+    """让 raw body 读取停在可观察 gate，用于验证取消不依赖上游继续产出。"""
+
+    def __init__(self, first_chunk=None):
+        self.first_chunk = first_chunk
+        self.read_started = asyncio.Event()
+        self.read_cancelled = asyncio.Event()
+        self.release = asyncio.Event()
+        self.close_count = 0
+
+    async def __aiter__(self):
+        if self.first_chunk is not None:
+            yield self.first_chunk
+        self.read_started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.read_cancelled.set()
+            raise
+        yield b"unexpected-after-release"
+
+    async def aclose(self):
+        self.close_count += 1
 
 
 async def _call_app_directly(raw_body: bytes, headers=None):
@@ -86,6 +113,48 @@ async def _call_app_directly(raw_body: bytes, headers=None):
     scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/responses",
+        "raw_path": b"/v1/responses",
+        "query_string": b"",
+        "headers": raw_headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("local.test", 80),
+        "root_path": "",
+        "state": {},
+    }
+    await app(scope, receive, send)
+    start = next(message for message in sent_messages if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent_messages
+        if message["type"] == "http.response.body"
+    )
+    return start["status"], start["headers"], body
+
+
+async def _call_stream_app_directly(raw_body: bytes, headers=None):
+    """以 ASGI 2.4 驱动有限流，避免客户端库自动解压或折叠重复 Header。"""
+    received_request = False
+    sent_messages = []
+    raw_headers = [(b"host", b"local.test"), (b"content-type", b"application/json")]
+    raw_headers.extend(headers or [])
+
+    async def receive():
+        nonlocal received_request
+        if not received_request:
+            received_request = True
+            return {"type": "http.request", "body": raw_body, "more_body": False}
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
@@ -1011,6 +1080,481 @@ def test_transport_close_failure_does_not_replace_complete_upstream_response(
 
     assert response.status_code == 200
     assert response.content == b'{"status":"completed"}'
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_stream_responses_preserves_native_sse_without_synthetic_events(
+    monkeypatch, tmp_path
+):
+    """公开流式入口应逐字节保留未知事件、注释、空行和上游终态。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    upstream_body = (
+        b": upstream-comment\n\n"
+        b"event: response.future_event\n"
+        b"data: {\"part\":1}\n"
+        b"data: {\"part\":2}\n\n"
+        b"event: response.completed\n"
+        b"data: {\"type\":\"response.completed\"}\n\n"
+    )
+    response_stream = _StaticAsyncByteStream(
+        [upstream_body[:17], upstream_body[17:61], upstream_body[61:]]
+    )
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=response_stream,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=b'{"model":"ordinary/model","input":"hello","stream":true}',
+        headers={"Accept-Encoding": "identity"},
+    )
+
+    assert response.status_code == 200
+    assert response.content == upstream_body
+    assert response.headers["content-type"] == "text/event-stream"
+    assert b"[DONE]" not in response.content
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_package_stream_uses_package_identity_and_preserves_context(
+    monkeypatch, tmp_path
+):
+    """套餐流式请求应复用原 body、套餐身份和调用方提供的上下文 Header。"""
+    import src.api.endpoints as endpoints
+
+    _install_catalog(monkeypatch, tmp_path, [_responses_package()])
+    captured = {}
+    raw_body = b'{ "model":"pkg/model", "input":"hello", "stream":true }'
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = await request.aread()
+        captured["headers"] = request.headers
+        return httpx.Response(
+            200,
+            stream=_StaticAsyncByteStream(
+                [b'event: response.completed\ndata: {"type":"response.completed"}\n\n']
+            ),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(
+        endpoints.responses_client,
+        "transport",
+        httpx.MockTransport(upstream_handler),
+    )
+
+    response = TestClient(app).post(
+        "/v1/responses",
+        content=raw_body,
+        headers={
+            "X-Client-Task-Id": "stream-task-original",
+            "X-Client-Trace-Id": "stream-trace-original",
+            "Accept-Encoding": "identity",
+        },
+    )
+
+    headers = captured["headers"]
+    assert response.status_code == 200
+    assert captured["body"] == raw_body
+    assert headers["authorization"] == "Bearer fake-package-key"
+    assert headers["x-api-key"] == "fake-package-key"
+    assert headers["x-ai-forward-url"] == "https://llm.api.zyuncs.com/v1"
+    assert headers["x-pkg-model"] == "2048"
+    assert headers["x-ai-forward-email"] == "tester@example.test"
+    assert headers["x-client-task-id"] == "stream-task-original"
+    assert headers["x-client-trace-id"] == "stream-trace-original"
+
+
+def test_stream_preserves_error_status_gzip_and_duplicate_headers(
+    monkeypatch, tmp_path
+):
+    """流式上游的错误状态、压缩字节和重复端到端 Header 必须原样交付。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    compressed_body = gzip.compress(
+        b'event: response.failed\ndata: {"type":"response.failed"}\n\n'
+    )
+    response_stream = _StaticAsyncByteStream(
+        [compressed_body[:7], compressed_body[7:]]
+    )
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            stream=response_stream,
+            headers=[
+                (b"Content-Type", b"text/event-stream"),
+                (b"Content-Encoding", b"gzip"),
+                (b"Set-Cookie", b"first=1"),
+                (b"Set-Cookie", b"second=2"),
+                (b"Retry-After", b"9"),
+                (b"Connection", b"X-Remove-Me"),
+                (b"X-Remove-Me", b"hidden"),
+                (b"Content-Length", b"999"),
+            ],
+        )
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    status_code, raw_headers, response_body = asyncio.run(
+        _call_stream_app_directly(
+            b'{"model":"ordinary/model","input":"hello","stream":true}',
+            headers=[(b"accept-encoding", b"gzip")],
+        )
+    )
+
+    normalized_headers = [(name.lower(), value) for name, value in raw_headers]
+    header_names = {name for name, _ in normalized_headers}
+    assert status_code == 429
+    assert response_body == compressed_body
+    assert (b"content-encoding", b"gzip") in normalized_headers
+    assert (b"retry-after", b"9") in normalized_headers
+    assert [
+        value for name, value in normalized_headers if name == b"set-cookie"
+    ] == [b"first=1", b"second=2"]
+    assert b"connection" not in header_names
+    assert b"x-remove-me" not in header_names
+    assert b"content-length" not in header_names
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_stream_failure_after_response_start_only_truncates_and_cleans_up(
+    monkeypatch, tmp_path, caplog
+):
+    """下游已开始后的上游异常只能截断 body，不能注入事件或记录敏感详情。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    partial_body = b'event: response.output_text.delta\ndata: {"delta":"A"}\n\n'
+    secret_detail = "private-upstream-body-and-fake-ordinary-key"
+    response_stream = _FailingAsyncByteStream(
+        httpx.ReadError(secret_detail),
+        first_chunk=partial_body,
+    )
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=response_stream,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+    caplog.set_level(logging.INFO)
+
+    status_code, _, response_body = asyncio.run(
+        _call_stream_app_directly(
+            b'{"model":"ordinary/model","input":"hello","stream":true}'
+        )
+    )
+
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert status_code == 200
+    assert response_body == partial_body
+    assert b"[DONE]" not in response_body
+    assert b"response.failed" not in response_body
+    assert "responses_stream_interrupted" in log_text
+    assert "ReadError" in log_text
+    assert secret_detail not in log_text
+    assert "fake-ordinary-key" not in log_text
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_cancelling_asgi_task_while_connecting_propagates_and_cleans_up(
+    monkeypatch, tmp_path
+):
+    """等待上游响应头时取消 ASGI task，应立即取消连接且不依赖释放 gate。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    connection_started = asyncio.Event()
+    connection_cancelled = asyncio.Event()
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        connection_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            connection_cancelled.set()
+            raise
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    async def exercise_cancel():
+        received_request = False
+
+        async def receive():
+            nonlocal received_request
+            if not received_request:
+                received_request = True
+                return {
+                    "type": "http.request",
+                    "body": b'{"model":"ordinary/model","input":"hello","stream":true}',
+                    "more_body": False,
+                }
+            await asyncio.Event().wait()
+
+        async def send(message):
+            raise AssertionError("连接完成前不应开始下游响应")
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/responses",
+            "raw_path": b"/v1/responses",
+            "query_string": b"",
+            "headers": [(b"host", b"local.test")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("local.test", 80),
+            "root_path": "",
+            "state": {},
+        }
+        app_task = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(connection_started.wait(), timeout=1)
+        app_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(app_task, timeout=1)
+
+    asyncio.run(exercise_cancel())
+
+    assert connection_cancelled.is_set()
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_cancelling_asgi_task_while_reading_stream_propagates_and_cleans_up(
+    monkeypatch, tmp_path
+):
+    """raw body 正在等待时取消 ASGI task，应取消 iterator 并完整释放上游资源。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    response_stream = _GatedAsyncByteStream()
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=response_stream,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    async def exercise_cancel():
+        received_request = False
+        sent_messages = []
+
+        async def receive():
+            nonlocal received_request
+            if not received_request:
+                received_request = True
+                return {
+                    "type": "http.request",
+                    "body": b'{"model":"ordinary/model","input":"hello","stream":true}',
+                    "more_body": False,
+                }
+            await asyncio.Event().wait()
+
+        async def send(message):
+            sent_messages.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/responses",
+            "raw_path": b"/v1/responses",
+            "query_string": b"",
+            "headers": [(b"host", b"local.test")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("local.test", 80),
+            "root_path": "",
+            "state": {},
+        }
+        app_task = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(response_stream.read_started.wait(), timeout=1)
+        assert any(
+            message["type"] == "http.response.start" for message in sent_messages
+        )
+        app_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(app_task, timeout=1)
+
+    asyncio.run(exercise_cancel())
+
+    assert response_stream.read_cancelled.is_set()
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_http_disconnect_stops_blocked_upstream_stream_without_releasing_gate(
+    monkeypatch, tmp_path
+):
+    """客户端断开时，阻塞中的上游读取必须立即取消并只清理一次。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    response_stream = _GatedAsyncByteStream()
+    disconnect = asyncio.Event()
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=response_stream,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    async def exercise_disconnect():
+        received_request = False
+
+        async def receive():
+            nonlocal received_request
+            if not received_request:
+                received_request = True
+                return {
+                    "type": "http.request",
+                    "body": b'{"model":"ordinary/model","input":"hello","stream":true}',
+                    "more_body": False,
+                }
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            return None
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/responses",
+            "raw_path": b"/v1/responses",
+            "query_string": b"",
+            "headers": [(b"host", b"local.test")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("local.test", 80),
+            "root_path": "",
+            "state": {},
+        }
+        app_task = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(response_stream.read_started.wait(), timeout=1)
+        disconnect.set()
+        await asyncio.wait_for(app_task, timeout=1)
+
+    asyncio.run(exercise_disconnect())
+
+    assert response_stream.read_cancelled.is_set()
+    assert response_stream.close_count == 1
+    assert transport.close_count == 1
+    assert endpoints.responses_client.active_requests == set()
+
+
+def test_downstream_send_failure_stops_stream_and_closes_resources_once(
+    monkeypatch, tmp_path
+):
+    """下游写入失败后不得继续拉取上游下一块，并且所有资源只关闭一次。"""
+    import src.api.endpoints as endpoints
+
+    _install_empty_catalog(monkeypatch, tmp_path)
+    response_stream = _GatedAsyncByteStream(first_chunk=b"first-native-sse-chunk")
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=response_stream,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = _TrackingMockTransport(upstream_handler)
+    monkeypatch.setattr(endpoints.responses_client, "base_url", "https://proxy.example.test")
+    monkeypatch.setattr(endpoints.responses_client, "api_key", "fake-ordinary-key")
+    monkeypatch.setattr(endpoints.responses_client, "transport", transport)
+
+    async def exercise_send_failure():
+        received_request = False
+
+        async def receive():
+            nonlocal received_request
+            if not received_request:
+                received_request = True
+                return {
+                    "type": "http.request",
+                    "body": b'{"model":"ordinary/model","input":"hello","stream":true}',
+                    "more_body": False,
+                }
+            await asyncio.Event().wait()
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                raise OSError("simulated downstream disconnect")
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/responses",
+            "raw_path": b"/v1/responses",
+            "query_string": b"",
+            "headers": [(b"host", b"local.test")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("local.test", 80),
+            "root_path": "",
+            "state": {},
+        }
+        with pytest.raises(ClientDisconnect):
+            await asyncio.wait_for(app(scope, receive, send), timeout=1)
+
+    asyncio.run(exercise_send_failure())
+
+    assert not response_stream.read_started.is_set()
     assert response_stream.close_count == 1
     assert transport.close_count == 1
     assert endpoints.responses_client.active_requests == set()
