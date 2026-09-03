@@ -4,7 +4,23 @@
 class Constants:
     """集中维护 Responses 代理的路径、Header 与稳定错误信息。"""
 
+    APP_NAME = "OpenAI Responses Proxy"
+    APP_VERSION = "1.0.0"
     DEFAULT_PORT = 7072
+    DEFAULT_HOST = "0.0.0.0"
+    DEFAULT_LOG_LEVEL = "INFO"
+    DEFAULT_REQUEST_TIMEOUT_SECONDS = 90
+    DEFAULT_READ_TIMEOUT_SECONDS = 480
+
+    ENV_UPSTREAM_BASE_URL = "CLAUDE_BASE_URL"
+    ENV_UPSTREAM_API_KEY = "CLAUDE_API_KEY"
+    ENV_UPSTREAM_API_KEY_COMPAT = "ANTHROPIC_API_KEY"
+    ENV_PROXY_API_KEY = "PROXY_API_KEY"
+    ENV_HOST = "HOST"
+    ENV_PORT = "PORT"
+    ENV_LOG_LEVEL = "LOG_LEVEL"
+    ENV_REQUEST_TIMEOUT = "REQUEST_TIMEOUT"
+    ENV_READ_TIMEOUT = "READ_TIMEOUT"
 
     HEADER_CLIENT_SOURCE = "x-src"
     HEADER_CLIENT_TASK_ID = "x-client-task-id"
@@ -12,6 +28,8 @@ class Constants:
     CLIENT_SOURCE_IDE = "ide"
 
     RESPONSES_CREATE_PATH = "/v1/responses"
+    HEALTH_PATH = "/health"
+    ROOT_PATH = "/"
     RESPONSES_HTTP_METHOD = "POST"
     RESPONSES_CONTENT_TYPE = "application/json"
     RESPONSES_DEFAULT_ACCEPT_ENCODING = "identity"

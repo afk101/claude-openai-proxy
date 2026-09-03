@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-openai-proxy"
+name = "openai-responses-proxy"
 version = "1.0.0"
-description = "Proxy server enabling OpenAI Chat Completions clients to call Claude Messages compatible services"
+description = "Transparent OpenAI Responses proxy with WisCode enterprise package routing"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -23,7 +23,7 @@ dev = ["pytest>=7.0.0"]
 dev = ["pytest>=7.0.0"]
 
 [project.scripts]
-claude-openai-proxy = "src.main:main"
+openai-responses-proxy = "src.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

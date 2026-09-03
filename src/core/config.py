@@ -9,15 +9,30 @@ class Config:
     """从环境变量读取代理服务配置。"""
 
     def __init__(self) -> None:
-        self.claude_api_key = os.environ.get("CLAUDE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+        self.upstream_api_key = os.environ.get(
+            Constants.ENV_UPSTREAM_API_KEY
+        ) or os.environ.get(Constants.ENV_UPSTREAM_API_KEY_COMPAT)
         # Responses 入口必须显式配置服务根地址，不能回退到其他协议的默认上游。
-        self.responses_base_url = os.environ.get("CLAUDE_BASE_URL")
-        self.client_api_key = os.environ.get("PROXY_API_KEY")
-        self.host = os.environ.get("HOST", "0.0.0.0")
-        self.port = int(os.environ.get("PORT", str(Constants.DEFAULT_PORT)))
-        self.log_level = os.environ.get("LOG_LEVEL", "INFO")
-        self.request_timeout = int(os.environ.get("REQUEST_TIMEOUT", "90"))
-        self.read_timeout = int(os.environ.get("READ_TIMEOUT", "480"))
+        self.upstream_base_url = os.environ.get(Constants.ENV_UPSTREAM_BASE_URL)
+        self.client_api_key = os.environ.get(Constants.ENV_PROXY_API_KEY)
+        self.host = os.environ.get(Constants.ENV_HOST, Constants.DEFAULT_HOST)
+        self.port = int(os.environ.get(Constants.ENV_PORT, str(Constants.DEFAULT_PORT)))
+        self.log_level = os.environ.get(
+            Constants.ENV_LOG_LEVEL,
+            Constants.DEFAULT_LOG_LEVEL,
+        )
+        self.request_timeout = int(
+            os.environ.get(
+                Constants.ENV_REQUEST_TIMEOUT,
+                str(Constants.DEFAULT_REQUEST_TIMEOUT_SECONDS),
+            )
+        )
+        self.read_timeout = int(
+            os.environ.get(
+                Constants.ENV_READ_TIMEOUT,
+                str(Constants.DEFAULT_READ_TIMEOUT_SECONDS),
+            )
+        )
 
     def validate_client_api_key(self, client_api_key: str) -> bool:
         """校验客户端访问代理时提供的 API Key。"""

@@ -500,10 +500,10 @@ def test_ordinary_key_configuration_prefers_claude_key(monkeypatch):
     """普通回退密钥保持 CLAUDE_API_KEY 优先、ANTHROPIC_API_KEY 兼容。"""
     monkeypatch.setenv("CLAUDE_API_KEY", "fake-claude-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key")
-    assert Config().claude_api_key == "fake-claude-key"
+    assert Config().upstream_api_key == "fake-claude-key"
 
     monkeypatch.delenv("CLAUDE_API_KEY")
-    assert Config().claude_api_key == "fake-anthropic-key"
+    assert Config().upstream_api_key == "fake-anthropic-key"
 
 
 def test_invalid_routing_envelope_returns_400_before_external_requests(

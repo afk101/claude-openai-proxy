@@ -1,7 +1,4 @@
-"""OpenAI-to-Claude API Proxy
-
-一个代理服务，使 OpenAI Chat Completions 客户端能够调用 Claude Messages 兼容服务。
-"""
+"""OpenAI Responses 极简透明代理。"""
 
 from dotenv import load_dotenv
 

@@ -23,8 +23,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 responses_client = ResponsesUpstreamClient(
-    config.claude_api_key,
-    config.responses_base_url,
+    config.upstream_api_key,
+    config.upstream_base_url,
     config.request_timeout,
     config.read_timeout,
 )
@@ -190,22 +190,27 @@ def _resolve_accept_encoding(http_request: Request) -> str:
     return ", ".join(values)
 
 
-@router.api_route("/health", methods=["GET", "HEAD"])
+@router.get(Constants.HEALTH_PATH)
+@router.head(Constants.HEALTH_PATH, include_in_schema=False)
 async def health_check():
     """健康检查。"""
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "responses_base_url": config.responses_base_url,
-        "ordinary_api_key_configured": bool(config.claude_api_key),
+        "upstream_base_url_configured": bool(config.upstream_base_url),
+        "ordinary_api_key_configured": bool(config.upstream_api_key),
         "client_api_key_validation": bool(config.client_api_key),
     }
 
 
-@router.api_route("/", methods=["GET", "HEAD"])
+@router.get(Constants.ROOT_PATH)
+@router.head(Constants.ROOT_PATH, include_in_schema=False)
 async def root():
     """根路径信息。"""
     return {
-        "message": "OpenAI Responses Proxy v1.0.0",
-        "endpoints": {"responses": Constants.RESPONSES_CREATE_PATH, "health": "/health"},
+        "message": f"{Constants.APP_NAME} v{Constants.APP_VERSION}",
+        "endpoints": {
+            "responses": Constants.RESPONSES_CREATE_PATH,
+            "health": Constants.HEALTH_PATH,
+        },
     }

@@ -8,17 +8,20 @@ from fastapi import FastAPI
 
 from src.api.endpoints import router as api_router
 from src.core.config import config
+from src.core.constants import Constants
 
-app = FastAPI(title="OpenAI-to-Claude API Proxy", version="1.0.0")
+app = FastAPI(title=Constants.APP_NAME, version=Constants.APP_VERSION)
 app.include_router(api_router)
 
 
 def main() -> None:
     """启动代理服务。"""
     if len(sys.argv) > 1 and sys.argv[1] == "--help":
-        print("OpenAI-to-Claude API Proxy v1.0.0")
+        print(f"{Constants.APP_NAME} v{Constants.APP_VERSION}")
         print("Usage: python -m src.main")
-        print("Required for real upstream calls: CLAUDE_API_KEY or ANTHROPIC_API_KEY")
+        print(f"Endpoint: POST {Constants.RESPONSES_CREATE_PATH}")
+        print("Required upstream root before /v1: CLAUDE_BASE_URL")
+        print("Ordinary fallback key: CLAUDE_API_KEY or ANTHROPIC_API_KEY")
         return
 
     log_level = config.log_level.split()[0].lower()
