@@ -15,7 +15,7 @@
 
 结果按上述来源顺序合并。模型名会去除两端空白并精确去重，大小写不同的名称仍视为不同模型。任一来源成功就返回 HTTP 200；两个来源都失败时返回 HTTP 502。部分失败只写入不含凭据的日志，不向 OpenAI 标准响应增加私有字段。
 
-每个模型固定返回 `object: "model"`、`created: 1704067200` 和 `owned_by: "360-zqi"`。模型调用只使用 `id`，固定的展示时间不会改变 `/v1/responses` 的路由行为。
+每个模型固定返回 `object: "model"` 和 `created: 1704067200`。第一来源的模型返回 `owned_by: "wiscode"`，第二来源的模型返回 `owned_by: "zqi"`；跨来源重名时保留第一来源，因此归属为 `wiscode`。模型调用只使用 `id`，这些展示字段不会改变 `/v1/responses` 的路由行为。
 
 ## 请求如何选择密钥
 
@@ -115,7 +115,7 @@ curl 'http://127.0.0.1:7072/v1/models' \
       "id": "WisGPT-5.6-Sol",
       "object": "model",
       "created": 1704067200,
-      "owned_by": "360-zqi"
+      "owned_by": "wiscode"
     }
   ]
 }

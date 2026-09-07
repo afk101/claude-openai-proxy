@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any, List, Optional, Protocol, Sequence
 
 import httpx
@@ -13,6 +14,14 @@ from src.core.zqi_catalog import ZqiCatalogClient, ZqiRouteResolver
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CatalogModel:
+    """聚合后保留模型名称及其首次命中来源的所有者。"""
+
+    id: str
+    owned_by: str
 
 
 class ModelNameSource(Protocol):
@@ -132,19 +141,27 @@ class ModelCatalogService:
         settings_source: ModelNameSource,
         package_source: ModelNameSource,
     ) -> None:
-        self.sources: Sequence[tuple[str, ModelNameSource]] = (
-            (Constants.MODELS_SOURCE_SETTINGS, settings_source),
-            (Constants.MODELS_SOURCE_PACKAGES, package_source),
+        self.sources: Sequence[tuple[str, str, ModelNameSource]] = (
+            (
+                Constants.MODELS_SOURCE_SETTINGS,
+                Constants.MODELS_OWNER_WISCODE,
+                settings_source,
+            ),
+            (
+                Constants.MODELS_SOURCE_PACKAGES,
+                Constants.MODELS_OWNER_ZQI,
+                package_source,
+            ),
         )
 
-    async def list_model_names(self) -> List[str]:
-        """任一来源成功即返回稳定去重结果；全部失败时返回 502。"""
+    async def list_models(self) -> List[CatalogModel]:
+        """任一来源成功即返回带来源的去重结果；全部失败时返回 502。"""
         results = await asyncio.gather(
-            *(source.list_model_names() for _, source in self.sources),
+            *(source.list_model_names() for _, _, source in self.sources),
             return_exceptions=True,
         )
-        successful_results: List[List[str]] = []
-        for (source_name, _), result in zip(self.sources, results):
+        successful_results: List[tuple[str, List[str]]] = []
+        for (source_name, owner, _), result in zip(self.sources, results):
             if isinstance(result, Exception):
                 # 只记录异常类型，避免第三方响应或认证信息进入日志。
                 logger.warning(
@@ -158,25 +175,27 @@ class ModelCatalogService:
                 source_name,
                 len(result),
             )
-            successful_results.append(result)
+            successful_results.append((owner, result))
 
         if not successful_results:
             raise HTTPException(
                 status_code=502,
                 detail=Constants.MODELS_ALL_SOURCES_FAILED_DETAIL,
             )
-        return _stable_unique_names(successful_results)
+        return _stable_unique_models(successful_results)
 
 
-def _stable_unique_names(groups: Sequence[Sequence[str]]) -> List[str]:
-    """按来源与上游顺序去重；名称大小写保持精确，不做隐式归一化。"""
+def _stable_unique_models(
+    groups: Sequence[tuple[str, Sequence[str]]],
+) -> List[CatalogModel]:
+    """按来源顺序去重，并保留模型首次出现时对应的所有者。"""
     seen = set()
-    unique_names: List[str] = []
-    for group in groups:
+    unique_models: List[CatalogModel] = []
+    for owner, group in groups:
         for raw_name in group:
             name = raw_name.strip()
             if not name or name in seen:
                 continue
             seen.add(name)
-            unique_names.append(name)
-    return unique_names
+            unique_models.append(CatalogModel(id=name, owned_by=owner))
+    return unique_models

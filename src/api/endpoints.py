@@ -140,17 +140,17 @@ async def create_response(
 @router.get(Constants.MODELS_LIST_PATH)
 async def list_models(_: None = Depends(validate_api_key)) -> dict:
     """聚合两个独立目录，并返回 OpenAI 兼容的模型列表。"""
-    model_names = await model_catalog_service.list_model_names()
+    models = await model_catalog_service.list_models()
     return {
         "object": Constants.MODELS_LIST_OBJECT,
         "data": [
             {
-                "id": model_name,
+                "id": model.id,
                 "object": Constants.MODELS_ITEM_OBJECT,
                 "created": Constants.MODELS_CREATED_TIMESTAMP,
-                "owned_by": Constants.MODELS_OWNED_BY,
+                "owned_by": model.owned_by,
             }
-            for model_name in model_names
+            for model in models
         ],
     }
 

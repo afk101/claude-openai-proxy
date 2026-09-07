@@ -90,7 +90,9 @@ def test_readme_and_env_example_match_runtime_contract():
     assert readme.count("/v1/models") >= 2
     assert "任一来源成功" in readme
     assert "`intranet-wiscode` 和 `extranet-wiscode`" in readme
-    assert '"owned_by": "360-zqi"' in readme
+    assert '`owned_by: "wiscode"`' in readme
+    assert '`owned_by: "zqi"`' in readme
+    assert "360-zqi" not in readme
     assert '"stream": true' in readme
     assert "目录中完全未出现" in readme
     assert "CLAUDE_API_KEY" in readme

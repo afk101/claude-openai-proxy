@@ -87,5 +87,6 @@ class Constants:
     MODELS_LIST_OBJECT = "list"
     MODELS_ITEM_OBJECT = "model"
     MODELS_CREATED_TIMESTAMP = 1704067200
-    MODELS_OWNED_BY = "360-zqi"
+    MODELS_OWNER_WISCODE = "wiscode"
+    MODELS_OWNER_ZQI = "zqi"
     MODELS_ALL_SOURCES_FAILED_DETAIL = "模型列表的两个上游来源均不可用"

@@ -105,19 +105,19 @@ def test_models_returns_only_wiscode_settings_groups_when_package_source_fails(
                 "id": "wiscode/internal",
                 "object": "model",
                 "created": 1704067200,
-                "owned_by": "360-zqi",
+                "owned_by": "wiscode",
             },
             {
                 "id": "shared/model",
                 "object": "model",
                 "created": 1704067200,
-                "owned_by": "360-zqi",
+                "owned_by": "wiscode",
             },
             {
                 "id": "wiscode/external",
                 "object": "model",
                 "created": 1704067200,
-                "owned_by": "360-zqi",
+                "owned_by": "wiscode",
             },
         ],
     }
@@ -184,8 +184,13 @@ def test_models_returns_only_available_responses_packages_when_settings_source_f
     response = TestClient(app).get("/v1/models")
 
     assert response.status_code == 200
-    assert [item["id"] for item in response.json()["data"]] == [
-        "responses/model"
+    assert response.json()["data"] == [
+        {
+            "id": "responses/model",
+            "object": "model",
+            "created": 1704067200,
+            "owned_by": "zqi",
+        }
     ]
 
 
@@ -249,11 +254,13 @@ def test_models_merges_both_sources_with_settings_order_and_exact_deduplication(
     response = TestClient(app).get("/v1/models")
 
     assert response.status_code == 200
-    assert [item["id"] for item in response.json()["data"]] == [
-        "shared/model",
-        "Settings/Model",
-        "settings/model",
-        "package/model",
+    assert [
+        (item["id"], item["owned_by"]) for item in response.json()["data"]
+    ] == [
+        ("shared/model", "wiscode"),
+        ("Settings/Model", "wiscode"),
+        ("settings/model", "zqi"),
+        ("package/model", "zqi"),
     ]
     assert "must-not-leak" not in response.text
     assert "fake-access-token" not in response.text
