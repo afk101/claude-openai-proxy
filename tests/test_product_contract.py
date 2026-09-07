@@ -12,8 +12,8 @@ from src.main import app
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_http_metadata_describes_only_responses_proxy():
-    """根路径、健康检查和 OpenAPI 只能声明真实存在的 Responses 产品面。"""
+def test_http_metadata_describes_responses_and_models_proxy():
+    """根路径与 OpenAPI 必须同时声明 Responses 创建和 Models 列表入口。"""
     client = TestClient(app)
 
     root_response = client.get("/")
@@ -23,6 +23,7 @@ def test_http_metadata_describes_only_responses_proxy():
     assert root_response.status_code == 200
     assert root_response.json()["endpoints"] == {
         "responses": "/v1/responses",
+        "models": "/v1/models",
         "health": "/health",
     }
     assert health_response.status_code == 200
@@ -38,6 +39,7 @@ def test_http_metadata_describes_only_responses_proxy():
     )
     assert schema["info"]["title"] == "OpenAI Responses Proxy"
     assert "/v1/responses" in schema["paths"]
+    assert "/v1/models" in schema["paths"]
     assert "/v1/chat/completions" not in schema["paths"]
 
 
@@ -52,6 +54,7 @@ def test_cli_help_explains_responses_endpoint_and_fallback_configuration(
     output = capsys.readouterr().out
     assert "OpenAI Responses Proxy" in output
     assert "POST /v1/responses" in output
+    assert "GET /v1/models" in output
     assert "CLAUDE_BASE_URL" in output
     assert "CLAUDE_API_KEY" in output
     assert "ANTHROPIC_API_KEY" in output
@@ -84,6 +87,10 @@ def test_readme_and_env_example_match_runtime_contract():
     assert "修改 `.env` 后需要重启" in readme
     assert "https://code.jizhi.360.cn/aiproxy" in readme
     assert readme.count("/v1/responses") >= 2
+    assert readme.count("/v1/models") >= 2
+    assert "任一来源成功" in readme
+    assert "`intranet-wiscode` 和 `extranet-wiscode`" in readme
+    assert '"owned_by": "360-zqi"' in readme
     assert '"stream": true' in readme
     assert "目录中完全未出现" in readme
     assert "CLAUDE_API_KEY" in readme

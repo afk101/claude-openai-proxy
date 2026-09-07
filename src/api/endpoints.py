@@ -15,7 +15,13 @@ from src.core.client import (
 )
 from src.core.config import config
 from src.core.constants import Constants
+from src.core.models_catalog import (
+    ModelCatalogService,
+    WisCodeSettingsModelSource,
+    ZqiPackageModelSource,
+)
 from src.core.request_context import resolve_request_context
+from src.core.wiscode_auth import WisCodeAuthProvider
 from src.core.zqi_catalog import ZqiCatalogClient, ZqiRouteResolver
 from src.models.responses import parse_responses_envelope
 
@@ -28,7 +34,13 @@ responses_client = ResponsesUpstreamClient(
     config.request_timeout,
     config.read_timeout,
 )
-zqi_route_resolver = ZqiRouteResolver(ZqiCatalogClient())
+wiscode_auth_provider = WisCodeAuthProvider()
+zqi_catalog_client = ZqiCatalogClient(auth_provider=wiscode_auth_provider)
+zqi_route_resolver = ZqiRouteResolver(zqi_catalog_client)
+model_catalog_service = ModelCatalogService(
+    WisCodeSettingsModelSource(wiscode_auth_provider),
+    ZqiPackageModelSource(zqi_catalog_client),
+)
 
 
 async def validate_api_key(
@@ -125,6 +137,24 @@ async def create_response(
     return response
 
 
+@router.get(Constants.MODELS_LIST_PATH)
+async def list_models(_: None = Depends(validate_api_key)) -> dict:
+    """聚合两个独立目录，并返回 OpenAI 兼容的模型列表。"""
+    model_names = await model_catalog_service.list_model_names()
+    return {
+        "object": Constants.MODELS_LIST_OBJECT,
+        "data": [
+            {
+                "id": model_name,
+                "object": Constants.MODELS_ITEM_OBJECT,
+                "created": Constants.MODELS_CREATED_TIMESTAMP,
+                "owned_by": Constants.MODELS_OWNED_BY,
+            }
+            for model_name in model_names
+        ],
+    }
+
+
 class _ManagedResponsesStreamingResponse(StreamingResponse):
     """把 Starlette 的断连监听与 Responses 上游资源的幂等关闭绑在一起。"""
 
@@ -211,6 +241,7 @@ async def root():
         "message": f"{Constants.APP_NAME} v{Constants.APP_VERSION}",
         "endpoints": {
             "responses": Constants.RESPONSES_CREATE_PATH,
+            "models": Constants.MODELS_LIST_PATH,
             "health": Constants.HEALTH_PATH,
         },
     }

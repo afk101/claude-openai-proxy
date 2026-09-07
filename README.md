@@ -1,10 +1,21 @@
 # OpenAI Responses Proxy
 
-这是一个只代理 OpenAI Responses Create 请求的轻量服务。
+这是一个代理 OpenAI Responses Create 请求，并提供 OpenAI Models 列表的轻量服务。
 
 客户端把原生 `POST /v1/responses` 请求交给本服务。服务只处理代理鉴权、智企套餐选择、普通密钥回退、必要请求头和连接清理。请求 JSON、非流式响应 body 和流式 SSE 都不做协议转换。
 
 “透明”只表示协议内容不转换。调用方的 `Authorization`、`x-api-key`、`Host`、`Content-Length` 和逐跳 Header 不会直接进入上游；上游身份由代理根据智企目录或本地配置决定。
+
+## 模型列表如何生成
+
+`GET /v1/models` 会并发读取两个相互独立的来源：
+
+1. 直接请求 `~/.wiscode/auth.json` 中 `host` 对应的 `/api/llm/config`，只读取 `intranet-wiscode` 和 `extranet-wiscode` 分组里的非空 `proxyName`，不按 `apiType` 过滤。
+2. 复用智企套餐目录，只收录支持 `responses`，并且套餐未过期、额度未耗尽、模型未禁用的模型。
+
+结果按上述来源顺序合并。模型名会去除两端空白并精确去重，大小写不同的名称仍视为不同模型。任一来源成功就返回 HTTP 200；两个来源都失败时返回 HTTP 502。部分失败只写入不含凭据的日志，不向 OpenAI 标准响应增加私有字段。
+
+每个模型固定返回 `object: "model"`、`created: 1704067200` 和 `owned_by: "360-zqi"`。模型调用只使用 `id`，固定的展示时间不会改变 `/v1/responses` 的路由行为。
 
 ## 请求如何选择密钥
 
@@ -78,6 +89,37 @@ uv run python -m src.main
 ```
 
 默认服务地址为 `http://127.0.0.1:7072`。
+
+## 获取模型列表
+
+未设置 `PROXY_API_KEY` 时：
+
+```bash
+curl 'http://127.0.0.1:7072/v1/models'
+```
+
+设置了 `PROXY_API_KEY` 时：
+
+```bash
+curl 'http://127.0.0.1:7072/v1/models' \
+  -H "Authorization: Bearer $PROXY_API_KEY"
+```
+
+响应示例：
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "WisGPT-5.6-Sol",
+      "object": "model",
+      "created": 1704067200,
+      "owned_by": "360-zqi"
+    }
+  ]
+}
+```
 
 ## 非流式调用
 

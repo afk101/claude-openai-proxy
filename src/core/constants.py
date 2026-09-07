@@ -28,6 +28,7 @@ class Constants:
     CLIENT_SOURCE_IDE = "ide"
 
     RESPONSES_CREATE_PATH = "/v1/responses"
+    MODELS_LIST_PATH = "/v1/models"
     HEALTH_PATH = "/health"
     ROOT_PATH = "/"
     RESPONSES_HTTP_METHOD = "POST"
@@ -74,3 +75,17 @@ class Constants:
     ZQI_INTERNAL_IDENTIFIER = "zyzj_package"
     ZQI_EXTERNAL_IDENTIFIER = "sfdj_package"
     ZQI_API_NAME_RESPONSES = "responses"
+
+    WISCODE_MODEL_CONFIG_PATH = "/api/llm/config"
+    WISCODE_MODEL_CONFIG_GROUPS = (
+        "intranet-wiscode",
+        "extranet-wiscode",
+    )
+    MODELS_SOURCE_TIMEOUT_SECONDS = 10
+    MODELS_SOURCE_SETTINGS = "settings"
+    MODELS_SOURCE_PACKAGES = "packages"
+    MODELS_LIST_OBJECT = "list"
+    MODELS_ITEM_OBJECT = "model"
+    MODELS_CREATED_TIMESTAMP = 1704067200
+    MODELS_OWNED_BY = "360-zqi"
+    MODELS_ALL_SOURCES_FAILED_DETAIL = "模型列表的两个上游来源均不可用"

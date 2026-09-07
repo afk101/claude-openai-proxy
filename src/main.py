@@ -20,6 +20,7 @@ def main() -> None:
         print(f"{Constants.APP_NAME} v{Constants.APP_VERSION}")
         print("Usage: python -m src.main")
         print(f"Endpoint: POST {Constants.RESPONSES_CREATE_PATH}")
+        print(f"Endpoint: GET {Constants.MODELS_LIST_PATH}")
         print("Required upstream root before /v1: CLAUDE_BASE_URL")
         print("Ordinary fallback key: CLAUDE_API_KEY or ANTHROPIC_API_KEY")
         return

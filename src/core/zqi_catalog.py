@@ -2,9 +2,6 @@
 
 import asyncio
 import copy
-import hashlib
-import json
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,17 +12,8 @@ import httpx
 from fastapi import HTTPException
 
 from src.core.constants import Constants
-
-_HOST_PATTERN = re.compile(r"^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$")
-
-
-@dataclass(frozen=True)
-class ZqiAuth:
-    """读取后的 WisCode 认证信息。"""
-
-    host: str
-    access_token: str
-    mail: Optional[str]
+from src.core.wiscode_auth import WisCodeAuth as ZqiAuth
+from src.core.wiscode_auth import WisCodeAuthProvider
 
 
 @dataclass(frozen=True)
@@ -55,8 +43,10 @@ class ZqiCatalogClient:
         auth_path: Optional[Path] = None,
         transport: Optional[httpx.AsyncBaseTransport] = None,
         now: Optional[Callable[[], datetime]] = None,
+        auth_provider: Optional[WisCodeAuthProvider] = None,
     ) -> None:
-        self.auth_path = auth_path or Path.home() / ".wiscode" / "auth.json"
+        self.auth_provider = auth_provider or WisCodeAuthProvider(auth_path)
+        self.auth_path = self.auth_provider.auth_path
         self.transport = transport
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.snapshot: Optional[ZqiSnapshot] = None
@@ -64,8 +54,8 @@ class ZqiCatalogClient:
 
     async def get_snapshot(self) -> ZqiSnapshot:
         """读取当前认证上下文对应的目录快照。"""
-        auth = self._read_auth()
-        fingerprint = self._fingerprint(auth)
+        auth = self.auth_provider.read()
+        fingerprint = self.auth_provider.fingerprint(auth)
         current = self.snapshot
         if (
             current
@@ -87,34 +77,12 @@ class ZqiCatalogClient:
             if self.snapshot and self.snapshot.auth_fingerprint == fingerprint:
                 self.snapshot = None
             raise
-        current_auth = self._read_auth()
-        current_fingerprint = self._fingerprint(current_auth)
+        current_auth = self.auth_provider.read()
+        current_fingerprint = self.auth_provider.fingerprint(current_auth)
         if fingerprint != current_fingerprint:
             return await self.get_snapshot()
         self.snapshot = snapshot
         return snapshot
-
-    def _read_auth(self) -> ZqiAuth:
-        """读取并校验 auth.json 的必要字段。"""
-        try:
-            raw = json.loads(self.auth_path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=500, detail="无法读取 ~/.wiscode/auth.json：文件不存在") from exc
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail="无法读取 ~/.wiscode/auth.json：文件读取失败") from exc
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=500, detail="~/.wiscode/auth.json JSON 解析失败") from exc
-        if not isinstance(raw, dict):
-            raise HTTPException(status_code=500, detail="~/.wiscode/auth.json 顶层类型错误：期望 object")
-
-        host = raw.get("host")
-        if not isinstance(host, str) or not host.strip() or not _HOST_PATTERN.fullmatch(host.strip()):
-            raise HTTPException(status_code=500, detail="~/.wiscode/auth.json.host 字段非法：期望 hostname 或 hostname:port")
-        token = raw.get("access_token")
-        if not isinstance(token, str) or not token.strip():
-            raise HTTPException(status_code=401, detail="~/.wiscode/auth.json.access_token 缺失或无效")
-        mail = raw.get("mail")
-        return ZqiAuth(host.strip(), token.strip(), mail if isinstance(mail, str) else None)
 
     def _clear_inflight_task(self, fingerprint: str, completed: asyncio.Task[ZqiSnapshot]) -> None:
         """仅清理仍指向当前任务的 single-flight 记录。"""
@@ -240,12 +208,6 @@ class ZqiCatalogClient:
         text = str(value)
         return text if text and "\r" not in text and "\n" not in text else None
 
-    @staticmethod
-    def _fingerprint(auth: ZqiAuth) -> str:
-        """生成不包含明文 token 的认证指纹。"""
-        return hashlib.sha256(f"{auth.host}\0{auth.access_token}".encode()).hexdigest()
-
-
 class ZqiRouteResolver:
     """根据目录快照解析单次模型请求 route。"""
 
@@ -294,6 +256,36 @@ class ZqiRouteResolver:
         if mail and len(mail) <= 320 and "\r" not in mail and "\n" not in mail and "@" in mail:
             headers["X-Ai-Forward-Email"] = mail
         return ZqiRoute(model, package["apiKey"]["full"], headers)
+
+    async def list_available_models(self) -> List[str]:
+        """按目录顺序列出至少有一个可用 Responses 套餐的模型。"""
+        snapshot = await self.catalog.get_snapshot()
+        candidates: List[str] = []
+        seen = set()
+        for package in snapshot.packages:
+            for model_item in package["models"]:
+                name = model_item["name"].strip()
+                if (
+                    name
+                    and name not in seen
+                    and Constants.ZQI_API_NAME_RESPONSES in model_item["apiNames"]
+                ):
+                    seen.add(name)
+                    candidates.append(name)
+
+        available: List[str] = []
+        now = self.catalog.now()
+        for name in candidates:
+            matches = [
+                (package, model_item)
+                for package in snapshot.packages
+                for model_item in package["models"]
+                if model_item["name"].strip() == name
+                and Constants.ZQI_API_NAME_RESPONSES in model_item["apiNames"]
+            ]
+            if self._select_package(matches, now, []) is not None:
+                available.append(name)
+        return available
 
     def _select_package(
         self,
